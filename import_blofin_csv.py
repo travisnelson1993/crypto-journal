@@ -4,7 +4,7 @@ Import Blofin CSV(s) into the trades table.
 
 Usage examples:
   # single file
-  python import_blofin_csv.py --input "/path/to/Order_history_*.csv" --db "dbname=crypto_journal user=postgres password=secret"
+  python import_blofin_csv.py --input "/path/to/Order_history_*.csv" --db "dbname=crypto_journal user=postgres password=<REDACTED>"
 
   # directory (process all .csv)
   python import_blofin_csv.py --input "/path/to/csv_dir" --archive-dir "/path/to/archive" --tz "America/Los_Angeles" --db "$CRYPTO_JOURNAL_DSN"

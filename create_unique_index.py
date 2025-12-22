@@ -17,7 +17,7 @@ Usage:
 Notes:
   - The script reads the DB DSN from the CRYPTO_JOURNAL_DSN environment variable.
   - Example DSN (PowerShell):
-    $env:CRYPTO_JOURNAL_DSN = "dbname=crypto_journal user=postgres password=YOURPASS host=127.0.0.1 port=5432"
+    $env:CRYPTO_JOURNAL_DSN = "dbname=crypto_journal user=postgres password=<REDACTED> host=127.0.0.1 port=5432"
 """
 import os
 import sys
@@ -68,7 +68,7 @@ def get_dsn():
     if not dsn:
         print("CRYPTO_JOURNAL_DSN environment variable is not set. Please set it and re-run.")
         print('Example (PowerShell):')
-        print('$env:CRYPTO_JOURNAL_DSN = "dbname=crypto_journal user=postgres password=YOURPASS host=127.0.0.1 port=5432"')
+        print('$env:CRYPTO_JOURNAL_DSN = "dbname=crypto_journal user=postgres password=<REDACTED> host=127.0.0.1 port=5432"')
         sys.exit(1)
     return dsn
 
