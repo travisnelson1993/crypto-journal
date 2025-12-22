@@ -5,3 +5,5 @@ asyncpg
 pydantic>=2.0
 python-dotenv
 python-multipart
+pandas
+psycopg2-binary
