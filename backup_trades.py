@@ -13,6 +13,7 @@ import os
 import sys
 from datetime import datetime
 import psycopg2
+from psycopg2 import sql
 
 
 def backup_trades(dsn, backup_name=None):
@@ -53,12 +54,20 @@ def backup_trades(dsn, backup_name=None):
         
         print(f"Creating backup of {count} trades...")
         
-        # Create backup table
-        cur.execute(f"CREATE TABLE {backup_name} AS SELECT * FROM trades")
+        # Create backup table using safe SQL identifier quoting
+        cur.execute(
+            sql.SQL("CREATE TABLE {} AS SELECT * FROM trades").format(
+                sql.Identifier(backup_name)
+            )
+        )
         conn.commit()
         
         # Verify backup
-        cur.execute(f"SELECT COUNT(*) FROM {backup_name}")
+        cur.execute(
+            sql.SQL("SELECT COUNT(*) FROM {}").format(
+                sql.Identifier(backup_name)
+            )
+        )
         backup_count = cur.fetchone()[0]
         
         if backup_count == count:

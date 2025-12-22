@@ -31,14 +31,20 @@ from psycopg2.extras import execute_values
 
 SOURCE_NAME = "blofin_order_history"
 
-# Add app utils to path so we can import side_parser
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'app'))
+# Try to import side_parser from app.utils
 try:
-    from utils.side_parser import infer_action_and_direction
+    # Try relative import first (if run as module)
+    from app.utils.side_parser import infer_action_and_direction
 except ImportError:
-    # Fallback if module not available
-    def infer_action_and_direction(side):
-        return None, None, None
+    try:
+        # Try adding to path if run as script
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'app'))
+        from utils.side_parser import infer_action_and_direction
+    except ImportError:
+        # Fallback if module not available - provide stub implementation
+        def infer_action_and_direction(side):
+            """Fallback implementation when side_parser is not available."""
+            return None, None, None
 
 def file_sha256(path):
     h = hashlib.sha256()
@@ -135,9 +141,13 @@ def detect_ticker_column(df):
     
     # Check if first column contains ticker data (malformed CSV header)
     first_col = df.columns[0]
-    if "Underlying Asset" in first_col or "," in first_col:
-        # Malformed header with comma-separated values
-        return first_col
+    if "," in first_col:
+        # Malformed header with comma-separated values - extract just ticker part
+        # Format like: "Underlying Asset,Margin Mode,Leverage,..."
+        parts = first_col.split(",")
+        if parts[0].strip() in possible_names:
+            # Return the full column name - we'll extract values properly in parsing
+            return first_col
     
     # Check standard column names
     for name in possible_names:
@@ -177,8 +187,17 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
         inserts_close = []
 
         for _, row in df.iterrows():
-            ticker = row.get(ticker_col, "")
-            if pd.isna(ticker) or not ticker:
+            ticker_raw = row.get(ticker_col, "")
+            if pd.isna(ticker_raw) or not ticker_raw:
+                continue
+            
+            # Handle malformed column where ticker is first in comma-separated list
+            ticker = ticker_raw.strip()
+            if "," in ticker_col and "," in ticker:
+                # Extract just the first part (the actual ticker)
+                ticker = ticker.split(",")[0].strip()
+            
+            if not ticker:
                 continue
                 
             leverage = row.get("Leverage", "")
