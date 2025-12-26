@@ -89,6 +89,9 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     print(f"Processing: {file_path}")
     file_hash = file_sha256(file_path)
 
+    # capture source filename for traceability
+    filename = os.path.basename(file_path)
+
     # create a cursor for work
     cur = conn.cursor()
 
@@ -165,6 +168,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
             "entry_summary": entry_summary,
             "orphan_close": False,
             "source": SOURCE_NAME,
+            "source_filename": filename,
             "created_at": datetime.utcnow()
         }
 
@@ -182,13 +186,13 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 (
                     r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
                     r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"], False
+                    r["entry_summary"], r["orphan_close"], r["source"], r["source_filename"], r["created_at"], False
                 )
                 for r in inserts_close
             ]
             execute_values(cur, """
             INSERT INTO trades
-            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, is_duplicate)
+            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, source_filename, created_at, is_duplicate)
             VALUES %s
             """, vals, page_size=200)
             print(f"  -> inserted {len(vals)} close trades")
@@ -199,14 +203,14 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 (
                     r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
                     r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"], False
+                    r["entry_summary"], r["orphan_close"], r["source"], r["source_filename"], r["created_at"], False
                 )
                 for r in inserts_open
             ]
             try:
                 execute_values(cur, """
                 INSERT INTO trades
-                (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, is_duplicate)
+                (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, source_filename, created_at, is_duplicate)
                 VALUES %s
                 ON CONFLICT (ticker, direction, entry_date, entry_price) DO NOTHING
                 """, vals, page_size=200)
@@ -230,14 +234,14 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                         params = (
                             r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
                             r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                            r["entry_summary"], r["orphan_close"], r["source"], r["created_at"], False,
+                            r["entry_summary"], r["orphan_close"], r["source"], r["source_filename"], r["created_at"], False,
                             r["ticker"], r["direction"], r["entry_date"], r["entry_price"]
                         )
                         try:
                             cur.execute("""
                             INSERT INTO trades
-                            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, is_duplicate)
-                            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, source_filename, created_at, is_duplicate)
+                            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                             WHERE NOT EXISTS (
                                 SELECT 1 FROM trades WHERE ticker = %s AND direction = %s AND entry_date = %s AND entry_price = %s AND end_date IS NULL
                             )
