@@ -1,5 +1,4 @@
--- scripts/schema.sql
--- Minimal schema required by importer and integration test
+﻿-- Minimal schema required by importer and integration test
 
 CREATE TABLE IF NOT EXISTS trades (
   id SERIAL PRIMARY KEY,
@@ -14,7 +13,9 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 
 -- Prevent duplicate open trades with same key (partial unique index)
-CREATE UNIQUE INDEX IF NOT EXISTS uq_open_trade_key ON trades (ticker, direction, entry_date, entry_price) WHERE end_date IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_open_trade_key
+  ON trades (ticker, direction, entry_date, entry_price)
+  WHERE end_date IS NULL;
 
 -- imported_files table (importer also ensures this table exists, but create here for CI init)
 CREATE TABLE IF NOT EXISTS imported_files (
