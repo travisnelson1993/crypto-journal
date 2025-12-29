@@ -76,16 +76,20 @@ def make_entry_summary(side, status):
         return f"Imported orphan close: {side}" if status.lower().startswith("filled") else f"Imported close: {side}"
 
 def ensure_imported_files_table(cur):
+    # use timestamptz for imported_at to avoid timezone mismatch issues
     cur.execute("""
     CREATE TABLE IF NOT EXISTS imported_files (
       id SERIAL PRIMARY KEY,
       filename TEXT NOT NULL,
       file_hash TEXT NOT NULL UNIQUE,
-      imported_at TIMESTAMP DEFAULT now()
+      imported_at TIMESTAMP WITH TIME ZONE DEFAULT now()
     );
     """)
 
 def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
+    """
+    Process one CSV file and import trades into `trades` table.
+    """
     print(f"Processing: {file_path}")
     file_hash = file_sha256(file_path)
 
@@ -123,6 +127,9 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     df = pd.read_csv(file_path, dtype=str)
     df.columns = [c.strip() for c in df.columns]
 
+    # basename used for source_filename on inserted rows
+    basename = os.path.basename(file_path) if file_path else ""
+
     inserts_open = []
     inserts_close = []
 
@@ -144,14 +151,13 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
         avg_fill = parse_price(row.get("Avg Fill", ""))
         status = row.get("Status", "")
 
-        # Optionally skip non-filled rows (uncomment if desired)
-        # if status.strip().lower() != "filled":
-        #     continue
-
         # use the robust parser from app.utils.side_parser
         action, direction, reason = infer_action_and_direction(side)
         open_flag = (action == "OPEN")
         entry_summary = make_entry_summary(side, status)
+
+        # Use timezone-aware UTC datetime for created_at
+        created_at = datetime.now(tz=ZoneInfo("UTC"))
 
         rec = {
             "ticker": ticker,
@@ -165,7 +171,8 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
             "entry_summary": entry_summary,
             "orphan_close": False,
             "source": SOURCE_NAME,
-            "created_at": datetime.utcnow()
+            "created_at": created_at,
+            "source_filename": basename or ""
         }
 
         if open_flag:
@@ -182,13 +189,14 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 (
                     r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
                     r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"], False
+                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
+                    (r.get("source_filename") or ""), False
                 )
                 for r in inserts_close
             ]
             execute_values(cur, """
             INSERT INTO trades
-            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, is_duplicate)
+            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
             VALUES %s
             """, vals, page_size=200)
             print(f"  -> inserted {len(vals)} close trades")
@@ -199,14 +207,15 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 (
                     r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
                     r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"], False
+                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
+                    (r.get("source_filename") or ""), False
                 )
                 for r in inserts_open
             ]
             try:
                 execute_values(cur, """
                 INSERT INTO trades
-                (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, is_duplicate)
+                (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
                 VALUES %s
                 ON CONFLICT (ticker, direction, entry_date, entry_price) DO NOTHING
                 """, vals, page_size=200)
@@ -230,14 +239,15 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                         params = (
                             r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
                             r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                            r["entry_summary"], r["orphan_close"], r["source"], r["created_at"], False,
+                            r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
+                            (r.get("source_filename") or ""), False,
                             r["ticker"], r["direction"], r["entry_date"], r["entry_price"]
                         )
                         try:
                             cur.execute("""
                             INSERT INTO trades
-                            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, is_duplicate)
-                            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
+                            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                             WHERE NOT EXISTS (
                                 SELECT 1 FROM trades WHERE ticker = %s AND direction = %s AND entry_date = %s AND entry_price = %s AND end_date IS NULL
                             )
