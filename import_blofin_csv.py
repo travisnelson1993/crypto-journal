@@ -226,6 +226,24 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                     except:
                         pass
                     cur = conn.cursor()
+                    
+                    # Re-insert close trades since they were rolled back
+                    if inserts_close:
+                        vals = [
+                            (
+                                r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
+                                r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
+                                r["entry_summary"], r["orphan_close"], r["source"], r["source_filename"], r["created_at"], False
+                            )
+                            for r in inserts_close
+                        ]
+                        execute_values(cur, """
+                        INSERT INTO trades
+                        (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, source_filename, created_at, is_duplicate)
+                        VALUES %s
+                        """, vals, page_size=200)
+                        print(f"  -> re-inserted {len(vals)} close trades after rollback")
+                    
                     fallback_count = 0
                     for r in inserts_open:
                         params = (
