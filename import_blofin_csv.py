@@ -16,6 +16,7 @@ Requirements:
 import argparse
 import glob
 import hashlib
+import logging
 import os
 import shutil
 import traceback
@@ -29,12 +30,17 @@ from app.utils.side_parser import infer_action_and_direction
 
 SOURCE_NAME = "blofin_order_history"
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+
 def file_sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
+
 
 def parse_price(s):
     if not isinstance(s, str):
@@ -46,6 +52,7 @@ def parse_price(s):
     import re
     m = re.match(r"([0-9\.\-eE]+)", s)
     return float(m.group(1)) if m else None
+
 
 def parse_datetime(s, tz=None):
     # CSV format like: 12/19/2025 05:57:22
@@ -66,6 +73,7 @@ def parse_datetime(s, tz=None):
     except Exception:
         return None
 
+
 def make_entry_summary(side, status):
     side = side or ""
     status = status or ""
@@ -74,6 +82,7 @@ def make_entry_summary(side, status):
         return f"Imported: {side}"
     else:
         return f"Imported orphan close: {side}" if status.lower().startswith("filled") else f"Imported close: {side}"
+
 
 def ensure_imported_files_table(cur):
     # use timestamptz for imported_at to avoid timezone mismatch issues
@@ -85,6 +94,164 @@ def ensure_imported_files_table(cur):
       imported_at TIMESTAMP WITH TIME ZONE DEFAULT now()
     );
     """)
+
+
+def _insert_opens_with_fallback(conn, cur, inserts_open):
+    """
+    Try bulk insert of opens with execute_values and ON CONFLICT fast path.
+    If ON CONFLICT path is not supported, fall back to safe per-row INSERT ... WHERE NOT EXISTS.
+    Return a cursor that is open and ready for further work (may be the same cur or a newly-created one).
+    This function raises on unexpected per-row errors to avoid silently skipping rows.
+    """
+    vals = [
+        (
+            r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
+            r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
+            r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
+            (r.get("source_filename") or ""), False
+        )
+        for r in inserts_open
+    ]
+
+    if not vals:
+        # nothing done; return the cursor we were given
+        return cur
+
+    try:
+        # Try fast bulk insert with ON CONFLICT (duplicates skipped)
+        execute_values(cur, """
+            INSERT INTO trades
+            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
+            VALUES %s
+            ON CONFLICT (ticker, direction, entry_date, entry_price) DO NOTHING
+            """, vals, page_size=200)
+        logger.info("  -> attempted insert %d open trades (duplicates skipped)", len(vals))
+        # still using the original cursor
+        return cur
+    except Exception as e:
+        msg = str(e).lower()
+        # If ON CONFLICT target not supported (no matching unique index), fall back to safe per-row inserts
+        if "no unique or exclusion constraint matching the on conflict specification" in msg or isinstance(e, psycopg2.errors.InvalidColumnReference):
+            logger.info("  -> ON CONFLICT not supported for this target in this DB connection, falling back to safe per-row inserts.")
+            conn.rollback()
+            # Close the old cursor and create a new one for per-row work.
+            try:
+                cur.close()
+            except Exception:
+                pass
+            cur = conn.cursor()
+            fallback_count = 0
+            for r in inserts_open:
+                params = (
+                    r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
+                    r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
+                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
+                    (r.get("source_filename") or ""), False,
+                    r["ticker"], r["direction"], r["entry_date"], r["entry_price"]
+                )
+                try:
+                    cur.execute("""
+                        INSERT INTO trades
+                        (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
+                        SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM trades WHERE ticker = %s AND direction = %s AND entry_date = %s AND entry_price = %s AND end_date IS NULL
+                        )
+                        """, params)
+                    fallback_count += 1
+                except Exception as inner_e:
+                    # On per-row failure, log full row and re-raise to fail CI/tests rather than silently skipping
+                    conn.rollback()
+                    logger.exception("    -> per-row insert FAILED for row=%r error=%s", r, inner_e)
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+                    raise
+            logger.info("  -> fallback attempted %d open trades (per-row), fallback loop ran %d executes", len(inserts_open), fallback_count)
+            # return the (new) cursor so caller keeps using an open one
+            return cur
+        else:
+            # Unexpected exception on bulk insert: re-raise
+            raise
+
+
+
+def _apply_closes_or_insert(cur, inserts_close, source_name):
+    """
+    For each close record:
+      - first try to UPDATE an existing open trade (end_date IS NULL) that matches entry_price and entry_date
+      - if no matching open found, try to UPDATE the most recent open trade for the same source/ticker/direction (end_date IS NULL)
+      - always INSERT a trade row representing the close record (so every CSV row is recorded)
+    This keeps the strict matching behavior when the CSV includes entry info,
+    but also ensures we store the close row itself for audit/idempotency.
+    """
+    for r in inserts_close:
+        try:
+            ticker = r["ticker"]
+            direction = r["direction"]
+            entry_price = r["entry_price"]
+            entry_date = r["entry_date"]
+            exit_price = r["exit_price"]
+            end_date = r["end_date"]
+            source_filename = r.get("source_filename", "")
+
+            # 1) Try the strict update (existing behavior) matching entry_price + entry_date
+            cur.execute("""
+                UPDATE trades
+                SET exit_price = %s,
+                    end_date = %s,
+                    source_filename = COALESCE(source_filename, %s)
+                WHERE source = %s
+                  AND ticker = %s
+                  AND direction = %s
+                  AND entry_price = %s
+                  AND entry_date = %s
+                  AND end_date IS NULL
+                """, (exit_price, end_date, source_filename, source_name,
+                      ticker, direction, entry_price, entry_date))
+
+            # 2) If strict update matched nothing, try the pragmatic fallback:
+            #    apply the close to the most recent open trade for this source/ticker/direction.
+            if cur.rowcount == 0:
+                cur.execute("""
+                    SELECT id FROM trades
+                    WHERE source = %s AND ticker = %s AND direction = %s AND end_date IS NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, (source_name, ticker, direction))
+                row = cur.fetchone()
+                if row:
+                    open_id = row[0]
+                    cur.execute("""
+                        UPDATE trades
+                        SET exit_price = %s,
+                            end_date = %s,
+                            source_filename = COALESCE(source_filename, %s)
+                        WHERE id = %s
+                    """, (exit_price, end_date, source_filename, open_id))
+                # else: no open to update; we'll insert the close row below
+
+            # 3) Always insert the close record as its own trade row so every CSV row is recorded.
+            insert_cols = (
+                'ticker', 'direction', 'entry_price', 'exit_price', 'stop_loss',
+                'leverage', 'entry_date', 'end_date', 'entry_summary', 'orphan_close',
+                'source', 'created_at', 'source_filename', 'is_duplicate'
+            )
+            insert_vals = (
+                r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
+                r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
+                r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
+                (r.get("source_filename") or ""), False
+            )
+            placeholders = ','.join(['%s'] * len(insert_cols))
+            q = f"INSERT INTO trades ({','.join(insert_cols)}) VALUES ({placeholders})"
+            cur.execute(q, insert_vals)
+
+        except Exception as exc:
+            logger.exception("Failed to apply close row %r: %s", r, exc)
+            raise
+
 
 def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     """
@@ -107,7 +274,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 ensure_imported_files_table(ddl_cur)
     except Exception as e:
         # Non-fatal: warn and continue; later INSERT will fail if the table truly doesn't exist
-        print("Warning: failed to ensure imported_files table exists:", e)
+        logger.warning("Warning: failed to ensure imported_files table exists: %s", e)
 
     # Recreate the working cursor (fresh transactional cursor)
     try:
@@ -183,88 +350,12 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
             inserts_close.append(rec)
 
     try:
-        # Insert close trades first
-        if inserts_close:
-            vals = [
-                (
-                    r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
-                    r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
-                    (r.get("source_filename") or ""), False
-                )
-                for r in inserts_close
-            ]
-            execute_values(cur, """
-            INSERT INTO trades
-            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
-            VALUES %s
-            """, vals, page_size=200)
-            print(f"  -> inserted {len(vals)} close trades")
+        # --- Two-pass processing (opens first, then closes applied as updates) ---
+        # 1) Insert open trades (bulk -> fallback to per-row)
+        cur = _insert_opens_with_fallback(conn, cur, inserts_open)
 
-        # Insert open trades using ON CONFLICT on business key (fast path)
-        if inserts_open:
-            vals = [
-                (
-                    r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
-                    r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
-                    (r.get("source_filename") or ""), False
-                )
-                for r in inserts_open
-            ]
-            try:
-                execute_values(cur, """
-                INSERT INTO trades
-                (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
-                VALUES %s
-                ON CONFLICT (ticker, direction, entry_date, entry_price) DO NOTHING
-                """, vals, page_size=200)
-                print(f"  -> attempted insert {len(vals)} open trades (duplicates skipped)")
-            except Exception as e:
-                # If Postgres rejects the ON CONFLICT target (no matching unique index),
-                # fall back to safe per-row INSERT ... WHERE NOT EXISTS
-                msg = str(e).lower()
-                if "no unique or exclusion constraint matching the on conflict specification" in msg or isinstance(e, psycopg2.errors.InvalidColumnReference):
-                    print("  -> ON CONFLICT not supported for this target in this DB connection, falling back to safe per-row inserts.")
-                    # rollback the failed transaction before continuing
-                    conn.rollback()
-                    # recreate cursor for clean state
-                    try:
-                        cur.close()
-                    except:
-                        pass
-                    cur = conn.cursor()
-                    fallback_count = 0
-                    for r in inserts_open:
-                        params = (
-                            r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
-                            r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                            r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
-                            (r.get("source_filename") or ""), False,
-                            r["ticker"], r["direction"], r["entry_date"], r["entry_price"]
-                        )
-                        try:
-                            cur.execute("""
-                            INSERT INTO trades
-                            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
-                            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                            WHERE NOT EXISTS (
-                                SELECT 1 FROM trades WHERE ticker = %s AND direction = %s AND entry_date = %s AND entry_price = %s AND end_date IS NULL
-                            )
-                            """, params)
-                            fallback_count += 1
-                        except Exception as inner_e:
-                            # rollback the single failed attempt and continue
-                            conn.rollback()
-                            print("    -> per-row insert failed for", r["ticker"], r["entry_date"], "error:", inner_e)
-                            try:
-                                cur.close()
-                            except:
-                                pass
-                            cur = conn.cursor()
-                    print(f"  -> fallback attempted {len(inserts_open)} open trades (per-row), some may have been skipped or failed; fallback loop ran {fallback_count} executes")
-                else:
-                    raise
+        # 2) Apply close rows: try to update matching open trade (end_date IS NULL). If none found, insert as closed trade.
+        _apply_closes_or_insert(cur, inserts_close, SOURCE_NAME)
 
         # Record the file as imported
         cur.execute("INSERT INTO imported_files (filename, file_hash) VALUES (%s, %s)", (os.path.basename(file_path), file_hash))
@@ -295,6 +386,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
         except:
             pass
 
+
 def gather_input_paths(input_arg):
     # If input is a directory, find *.csv inside
     if os.path.isdir(input_arg):
@@ -303,6 +395,7 @@ def gather_input_paths(input_arg):
     # If glob pattern or single file
     paths = sorted(glob.glob(input_arg))
     return [p for p in paths if os.path.isfile(p)]
+
 
 def main():
     p = argparse.ArgumentParser()
@@ -337,6 +430,7 @@ def main():
             process_file(conn, path, tz=args.tz, archive_dir=args.archive_dir, dry_run=args.dry_run)
     finally:
         conn.close()
+
 
 if __name__ == "__main__":
     main()
