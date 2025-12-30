@@ -183,23 +183,80 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
             inserts_close.append(rec)
 
     try:
-        # Insert close trades first
+        # Process close trades with robust matching logic
         if inserts_close:
-            vals = [
-                (
+            close_applied = 0
+            close_inserted = 0
+            orphan_inserted = 0
+            
+            for r in inserts_close:
+                # Step 1: Try strict UPDATE to match existing open trade
+                cur.execute("""
+                    UPDATE trades
+                    SET end_date = %s,
+                        exit_price = %s,
+                        source_filename = COALESCE(source_filename, %s)
+                    WHERE source = %s
+                      AND ticker = %s
+                      AND direction = %s
+                      AND entry_price = %s
+                      AND entry_date = %s
+                      AND end_date IS NULL
+                """, (
+                    r["end_date"], r["exit_price"], r["source_filename"],
+                    r["source"], r["ticker"], r["direction"], r["entry_price"], r["entry_date"]
+                ))
+                
+                matched = cur.rowcount
+                
+                # Step 2: If no strict match, find most recent open trade
+                if matched == 0:
+                    cur.execute("""
+                        SELECT id
+                        FROM trades
+                        WHERE source = %s
+                          AND ticker = %s
+                          AND direction = %s
+                          AND end_date IS NULL
+                        ORDER BY entry_date DESC
+                        LIMIT 1
+                    """, (r["source"], r["ticker"], r["direction"]))
+                    
+                    row_id = cur.fetchone()
+                    if row_id:
+                        # Update the most recent open trade
+                        cur.execute("""
+                            UPDATE trades
+                            SET end_date = %s,
+                                exit_price = %s,
+                                source_filename = COALESCE(source_filename, %s)
+                            WHERE id = %s
+                        """, (r["end_date"], r["exit_price"], r["source_filename"], row_id[0]))
+                        close_applied += 1
+                    else:
+                        # No open trade found - mark as orphan
+                        r["orphan_close"] = True
+                        orphan_inserted += 1
+                else:
+                    close_applied += 1
+                
+                # Step 3: Always INSERT a trade row for the close CSV row (audit trail)
+                cur.execute("""
+                    INSERT INTO trades
+                    (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
                     r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
                     r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
                     r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
-                    (r.get("source_filename") or ""), False
-                )
-                for r in inserts_close
-            ]
-            execute_values(cur, """
-            INSERT INTO trades
-            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
-            VALUES %s
-            """, vals, page_size=200)
-            print(f"  -> inserted {len(vals)} close trades")
+                    r["source_filename"], False
+                ))
+                close_inserted += 1
+            
+            print(f"  -> applied {close_applied} closes to open trades")
+            print(f"  -> inserted {close_inserted} close trade rows (audit trail)")
+            if orphan_inserted > 0:
+                print(f"  -> {orphan_inserted} orphan closes (no matching open trade)")
 
         # Insert open trades using ON CONFLICT on business key (fast path)
         if inserts_open:
@@ -263,6 +320,10 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                                 pass
                             cur = conn.cursor()
                     print(f"  -> fallback attempted {len(inserts_open)} open trades (per-row), some may have been skipped or failed; fallback loop ran {fallback_count} executes")
+                    # Ensure cursor is valid after fallback loop (fix for cursor already closed bug)
+                    # If the last iteration had an error, cur might be newly created but we verify it's open
+                    if cur.closed:
+                        cur = conn.cursor()
                 else:
                     raise
 

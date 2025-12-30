@@ -11,3 +11,8 @@ __pycache__/
 # Editor / OS
 .vscode/
 .DS_Store
+
+# Local developer files
+archive/
+backups/
+scripts/show_trades.py
