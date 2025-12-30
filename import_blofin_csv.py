@@ -246,7 +246,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                             cur = conn.cursor()
                     print(f"  -> fallback attempted {len(inserts_open)} open trades (per-row), some may have been skipped or failed; fallback loop ran {fallback_count} executes")
                     # Ensure cursor is valid after fallback loop (fix for cursor already closed bug)
-                    # If the last iteration had an error, cur might be newly created but we verify it's open
+                    # This handles edge case where last iteration succeeded but cursor state is uncertain
                     if cur.closed:
                         cur = conn.cursor()
                 else:
@@ -260,6 +260,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
             
             for r in inserts_close:
                 # Step 1: Try strict UPDATE to match existing open trade
+                # COALESCE preserves existing source_filename from open row if already set
                 cur.execute("""
                     UPDATE trades
                     SET end_date = %s,
@@ -294,6 +295,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                     row_id = cur.fetchone()
                     if row_id:
                         # Update the most recent open trade
+                        # COALESCE preserves existing source_filename from open row if already set
                         cur.execute("""
                             UPDATE trades
                             SET end_date = %s,
