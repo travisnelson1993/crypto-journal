@@ -235,12 +235,13 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 if "no unique or exclusion constraint matching the on conflict specification" in msg or isinstance(e, psycopg2.errors.InvalidColumnReference):
                     # Rollback only the failed bulk insert, preserving earlier close inserts
                     # ROLLBACK TO SAVEPOINT undoes the bulk insert but keeps the savepoint alive
-                    # RELEASE SAVEPOINT destroys the savepoint to clean up
+                    # RELEASE SAVEPOINT destroys it since we're moving to the per-row fallback
                     cur.execute("ROLLBACK TO SAVEPOINT open_bulk")
                     cur.execute("RELEASE SAVEPOINT open_bulk")
                     
                     # Per-row fallback with individual savepoints for isolation
                     fallback_count = 0
+                    fallback_errors = 0
                     for i, r in enumerate(inserts_open):
                         params = (
                             r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
@@ -249,6 +250,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                             (r.get("source_filename") or ""), False,
                             r["ticker"], r["direction"], r["entry_date"], r["entry_price"]
                         )
+                        # Use numeric index for savepoint name (safe from SQL injection)
                         sp_name = f"sp_{i}"
                         try:
                             cur.execute(f"SAVEPOINT {sp_name}")
@@ -265,14 +267,15 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                         except Exception as inner_e:
                             # Rollback only this row's insert, continue with others
                             # ROLLBACK TO SAVEPOINT undoes changes but keeps the savepoint alive
-                            # RELEASE SAVEPOINT destroys it to clean up resources
+                            # RELEASE SAVEPOINT destroys it since we're done with this iteration
+                            fallback_errors += 1
                             try:
                                 cur.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
                                 cur.execute(f"RELEASE SAVEPOINT {sp_name}")
                             except Exception as sp_e:
                                 # If savepoint operations fail, this could indicate serious DB issues
                                 logger.warning(f"Savepoint {sp_name} cleanup failed after insert error (original error: {inner_e}): {sp_e}")
-                    logger.info(f"  -> fallback completed: attempted {len(inserts_open)} open trades via per-row inserts, {fallback_count} executed successfully")
+                    logger.info(f"  -> fallback completed: attempted {len(inserts_open)} open trades, {fallback_count} successful, {fallback_errors} failed")
                 else:
                     raise
 
