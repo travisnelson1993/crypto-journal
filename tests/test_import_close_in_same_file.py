@@ -4,8 +4,10 @@ import uuid
 import subprocess
 import sys
 import psycopg2
+import pytest
 
 
+@pytest.mark.integration
 def test_close_in_same_file_applies_update(tmp_path):
     """
     Self-contained regression test that:
