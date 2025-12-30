@@ -56,6 +56,7 @@ def get_recent_source_filenames(conn, limit=100):
         cur.execute("SELECT source_filename FROM trades WHERE source = %s ORDER BY created_at DESC LIMIT %s", (SOURCE_NAME, limit))
         return [r[0] for r in cur.fetchall()]
 
+@pytest.mark.integration
 def test_importer_idempotent_and_records_filename(tmp_path, dsn):
     # prepare DB
     conn = get_conn(dsn)
