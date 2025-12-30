@@ -300,12 +300,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
             inserts_close.append(rec)
 
     try:
-        # Apply close trades with two-step update + always insert behavior
-        if inserts_close:
-            cur = _apply_closes_or_insert(conn, cur, inserts_close, basename)
-            print(f"  -> applied {len(inserts_close)} close trades (updated opens where found + inserted close rows)")
-
-        # Insert open trades using ON CONFLICT on business key (fast path)
+        # Insert open trades first (they need to exist before closes can update them)
         if inserts_open:
             vals = [
                 (
@@ -342,6 +337,11 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                     cur = _fallback_insert_open_trades(conn, cur, inserts_open)
                 else:
                     raise
+
+        # Apply close trades with two-step update + always insert behavior (after opens are inserted)
+        if inserts_close:
+            cur = _apply_closes_or_insert(conn, cur, inserts_close, basename)
+            print(f"  -> applied {len(inserts_close)} close trades (updated opens where found + inserted close rows)")
 
         # Record the file as imported
         cur.execute("INSERT INTO imported_files (filename, file_hash) VALUES (%s, %s)", (os.path.basename(file_path), file_hash))
