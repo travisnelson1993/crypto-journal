@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -8,47 +8,41 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  tests:
-    name: Run tests
+  unit-tests:
+    name: Unit Tests
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: [3.11]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.11
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: 3.11
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # ensure test/runtime deps needed by importer/tests are present
           python -m pip install pytest pandas psycopg2-binary numpy
 
-      - name: Run pytest (unit tests)
-        run: python -m pytest -q
+      - name: Run pytest (unit tests only, skip integration)
+        run: python -m pytest -m "not integration" -v
 
-  integration:
-    name: Integration tests (manual)
+  integration-tests:
+    name: Integration Tests (Postgres)
     runs-on: ubuntu-latest
-    # only run this job when manually triggered
-    if: github.event_name == 'workflow_dispatch'
     services:
       postgres:
-        image: postgres:15
+        image: postgres:14
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: testdb
+          POSTGRES_DB: crypto_journal
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d testdb"
+          --health-cmd "pg_isready -U postgres -d crypto_journal"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -56,14 +50,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Wait for Postgres to be ready
-        run: |
-          echo "Waiting for Postgres..."
-          for i in {1..30}; do
-            pg_isready -h localhost -p 5432 -U postgres -d testdb && break
-            sleep 1
-          done
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v4
@@ -81,15 +67,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      - name: Initialize DB from schema
+      - name: Wait for Postgres to be ready
+        run: |
+          echo "Waiting for Postgres..."
+          for i in {1..30}; do
+            pg_isready -h localhost -p 5432 -U postgres -d crypto_journal && break
+            sleep 1
+          done
+
+      - name: Apply database schema
         env:
           PGPASSWORD: postgres
         run: |
-          psql "postgresql://postgres:postgres@localhost:5432/testdb" -f scripts/schema.sql
+          if [ -f alembic.ini ]; then
+            echo "Running alembic migrations..."
+            alembic upgrade head
+          else
+            echo "Applying schema from scripts/schema.sql..."
+            psql -h localhost -p 5432 -U postgres -d crypto_journal -f scripts/schema.sql
+          fi
 
-      - name: Export CRYPTO_JOURNAL_DSN
-        run: echo "CRYPTO_JOURNAL_DSN=postgresql://postgres:postgres@localhost:5432/testdb" >> $GITHUB_ENV
-
-      - name: Run only integration test (importer)
-        run: |
-          python -m pytest tests/test_import_integration.py -k importer -s -vv
+      - name: Run integration tests
+        env:
+          CRYPTO_JOURNAL_DSN: "host=127.0.0.1 port=5432 dbname=crypto_journal user=postgres password=postgres"
+        run: python -m pytest -m integration -v

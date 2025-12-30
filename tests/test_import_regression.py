@@ -52,6 +52,7 @@ def get_recent_source_filenames(conn, limit=100):
         return [r[0] for r in cur.fetchall()]
 
 
+@pytest.mark.integration
 def test_importer_records_source_filename(tmp_path, dsn):
     conn = get_conn(dsn)
     cleanup_db(conn)
