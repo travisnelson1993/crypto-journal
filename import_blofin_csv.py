@@ -264,13 +264,14 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                             fallback_count += 1
                         except Exception as inner_e:
                             # Rollback only this row's insert, continue with others
-                            # ROLLBACK TO SAVEPOINT undoes changes and keeps the savepoint alive
-                            # We don't need to RELEASE since we'll create a new savepoint with a different name
+                            # ROLLBACK TO SAVEPOINT undoes changes but keeps the savepoint alive
+                            # RELEASE SAVEPOINT destroys it to clean up resources
                             try:
                                 cur.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                                cur.execute(f"RELEASE SAVEPOINT {sp_name}")
                             except Exception as sp_e:
-                                # If rollback fails, log but continue
-                                logger.debug(f"Savepoint rollback failed: {sp_e}")
+                                # If savepoint operations fail, log with context but continue
+                                logger.debug(f"Savepoint {sp_name} cleanup failed after insert error (original error: {inner_e}): {sp_e}")
                     logger.info(f"  -> fallback completed: attempted {len(inserts_open)} open trades via per-row inserts, {fallback_count} executed successfully")
                 else:
                     raise
