@@ -148,7 +148,7 @@ def _apply_closes_or_insert(conn, cur, inserts_close, basename):
             print(f"    -> close trade application failed for {r['ticker']} {r['end_date']}, error: {inner_e}")
             try:
                 cur.close()
-            except:
+            except Exception:
                 pass
             cur = conn.cursor()
     
@@ -186,7 +186,7 @@ def _fallback_insert_open_trades(conn, cur, inserts_open):
             print("    -> per-row insert failed for", r["ticker"], r["entry_date"], "error:", inner_e)
             try:
                 cur.close()
-            except:
+            except Exception:
                 pass
             cur = conn.cursor()
     print(f"  -> fallback attempted {len(inserts_open)} open trades (per-row), some may have been skipped or failed; fallback loop ran {fallback_count} executes")
@@ -229,7 +229,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     # Recreate the working cursor (fresh transactional cursor)
     try:
         cur.close()
-    except:
+    except Exception:
         pass
     cur = conn.cursor()
 
@@ -330,7 +330,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                     # recreate cursor for clean state
                     try:
                         cur.close()
-                    except:
+                    except Exception:
                         pass
                     cur = conn.cursor()
                     # Use helper function that returns valid cursor
@@ -369,7 +369,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     finally:
         try:
             cur.close()
-        except:
+        except Exception:
             pass
 
 def gather_input_paths(input_arg):

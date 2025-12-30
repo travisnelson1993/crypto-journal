@@ -82,23 +82,9 @@ def test_importer_applies_close_and_inserts_close_row(tmp_path, dsn):
     # Verify results
     conn = get_conn(dsn)
     with conn.cursor() as cur:
-        # Count total trades
+        # Count total trades - expect 2 DB rows (one per CSV row)
         cur.execute("SELECT count(*) FROM trades WHERE source = %s", (SOURCE_NAME,))
         total_count = cur.fetchone()[0]
-        
-        # Expected: 3 rows total
-        # - 1 open trade (with end_date set after close is applied)
-        # - 1 close row (inserted for the close CSV row)
-        # Actually, wait - let me re-read the spec. It says:
-        # "Always INSERT a trade row representing the close CSV row so there is one DB row per CSV row"
-        # So we expect: 1 open + 1 close = 2 rows matching CSV rows
-        # But the open row should have end_date set because the close updated it
-        
-        # Let's verify:
-        # 1. One row with end_date IS NULL initially becomes end_date IS NOT NULL (the open that was updated)
-        # 2. One row representing the close CSV row
-        # Total: We should see 2 DB rows, one of which is the "open" and one is the "close"
-        
         assert total_count == 2, f"Expected 2 DB rows (one per CSV row), got {total_count}"
         
         # Get the open trade (should have end_date set after close application)
