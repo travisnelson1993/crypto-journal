@@ -16,6 +16,7 @@ Requirements:
 import argparse
 import glob
 import hashlib
+import logging
 import os
 import shutil
 import traceback
@@ -26,6 +27,10 @@ import psycopg2
 from psycopg2.extras import execute_values
 
 from app.utils.side_parser import infer_action_and_direction
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 SOURCE_NAME = "blofin_order_history"
 
@@ -90,7 +95,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     """
     Process one CSV file and import trades into `trades` table.
     """
-    print(f"Processing: {file_path}")
+    logger.info(f"Processing: {file_path}")
     file_hash = file_sha256(file_path)
 
     # create a cursor for work
@@ -107,7 +112,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 ensure_imported_files_table(ddl_cur)
     except Exception as e:
         # Non-fatal: warn and continue; later INSERT will fail if the table truly doesn't exist
-        print("Warning: failed to ensure imported_files table exists:", e)
+        logger.warning(f"Failed to ensure imported_files table exists: {e}")
 
     # Recreate the working cursor (fresh transactional cursor)
     try:
@@ -119,7 +124,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     # Check if we've already imported this file
     cur.execute("SELECT 1 FROM imported_files WHERE file_hash = %s", (file_hash,))
     if cur.fetchone():
-        print("  -> already imported (hash match). Skipping.")
+        logger.info("  -> already imported (hash match). Skipping.")
         cur.close()
         return
 
@@ -199,7 +204,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
             (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
             VALUES %s
             """, vals, page_size=200)
-            print(f"  -> inserted {len(vals)} close trades")
+            logger.info(f"  -> inserted {len(vals)} close trades")
 
         # Insert open trades using ON CONFLICT on business key (fast path)
         if inserts_open:
@@ -212,6 +217,8 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 )
                 for r in inserts_open
             ]
+            # Wrap bulk insert in a savepoint so failure doesn't undo earlier close inserts
+            cur.execute("SAVEPOINT open_bulk")
             try:
                 execute_values(cur, """
                 INSERT INTO trades
@@ -219,23 +226,19 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 VALUES %s
                 ON CONFLICT (ticker, direction, entry_date, entry_price) DO NOTHING
                 """, vals, page_size=200)
-                print(f"  -> attempted insert {len(vals)} open trades (duplicates skipped)")
+                cur.execute("RELEASE SAVEPOINT open_bulk")
             except Exception as e:
                 # If Postgres rejects the ON CONFLICT target (no matching unique index),
                 # fall back to safe per-row INSERT ... WHERE NOT EXISTS
                 msg = str(e).lower()
                 if "no unique or exclusion constraint matching the on conflict specification" in msg or isinstance(e, psycopg2.errors.InvalidColumnReference):
-                    print("  -> ON CONFLICT not supported for this target in this DB connection, falling back to safe per-row inserts.")
-                    # rollback the failed transaction before continuing
-                    conn.rollback()
-                    # recreate cursor for clean state
-                    try:
-                        cur.close()
-                    except:
-                        pass
-                    cur = conn.cursor()
+                    # Rollback only the failed bulk insert, preserving earlier close inserts
+                    cur.execute("ROLLBACK TO SAVEPOINT open_bulk")
+                    cur.execute("RELEASE SAVEPOINT open_bulk")
+                    
+                    # Per-row fallback with individual savepoints for isolation
                     fallback_count = 0
-                    for r in inserts_open:
+                    for i, r in enumerate(inserts_open):
                         params = (
                             r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
                             r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
@@ -243,7 +246,9 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                             (r.get("source_filename") or ""), False,
                             r["ticker"], r["direction"], r["entry_date"], r["entry_price"]
                         )
+                        sp_name = f"sp_{i}"
                         try:
+                            cur.execute(f"SAVEPOINT {sp_name}")
                             cur.execute("""
                             INSERT INTO trades
                             (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
@@ -252,17 +257,12 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                                 SELECT 1 FROM trades WHERE ticker = %s AND direction = %s AND entry_date = %s AND entry_price = %s AND end_date IS NULL
                             )
                             """, params)
+                            cur.execute(f"RELEASE SAVEPOINT {sp_name}")
                             fallback_count += 1
                         except Exception as inner_e:
-                            # rollback the single failed attempt and continue
-                            conn.rollback()
-                            print("    -> per-row insert failed for", r["ticker"], r["entry_date"], "error:", inner_e)
-                            try:
-                                cur.close()
-                            except:
-                                pass
-                            cur = conn.cursor()
-                    print(f"  -> fallback attempted {len(inserts_open)} open trades (per-row), some may have been skipped or failed; fallback loop ran {fallback_count} executes")
+                            # Rollback only this row's insert, continue with others
+                            cur.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                            cur.execute(f"RELEASE SAVEPOINT {sp_name}")
                 else:
                     raise
 
@@ -271,24 +271,24 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
 
         if not dry_run:
             conn.commit()
-            print("  -> file import committed")
+            logger.info("  -> file import committed")
         else:
             # rollback any changes made during dry-run so DB is not modified
             conn.rollback()
-            print("  -> dry-run: changes rolled back (no commit)")
+            logger.info("  -> dry-run: changes rolled back (no commit)")
 
         # Optionally archive the file (only on non-dry-run)
         if archive_dir and not dry_run:
             os.makedirs(archive_dir, exist_ok=True)
             dest = os.path.join(archive_dir, os.path.basename(file_path))
             shutil.move(file_path, dest)
-            print(f"  -> moved file to archive: {dest}")
+            logger.info(f"  -> moved file to archive: {dest}")
 
     except Exception as e:
         conn.rollback()
-        print("\n  -> ERROR during import, transaction rolled back:")
-        print("Exception:", str(e))
-        print(traceback.format_exc())
+        logger.error("\n  -> ERROR during import, transaction rolled back:")
+        logger.error(f"Exception: {str(e)}")
+        logger.error(traceback.format_exc())
     finally:
         try:
             cur.close()
@@ -319,7 +319,7 @@ def main():
 
     paths = gather_input_paths(args.input)
     if not paths:
-        print("No CSV files found for input:", args.input)
+        logger.info(f"No CSV files found for input: {args.input}")
         return
 
     conn = psycopg2.connect(dsn)
@@ -330,8 +330,8 @@ def main():
                 SELECT indexname FROM pg_indexes WHERE indexname = 'uniq_open_trade_on_fields';
             """)
             if not cur.fetchone():
-                print("\nWARNING: 'uniq_open_trade_on_fields' index is missing! This can cause duplicates for open trades.")
-                print("Run create_unique_index.py to add this index for consistency.\n")
+                logger.warning("\nWARNING: 'uniq_open_trade_on_fields' index is missing! This can cause duplicates for open trades.")
+                logger.warning("Run create_unique_index.py to add this index for consistency.\n")
 
         for path in paths:
             process_file(conn, path, tz=args.tz, archive_dir=args.archive_dir, dry_run=args.dry_run)
