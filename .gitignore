@@ -11,3 +11,7 @@ __pycache__/
 # Editor / OS
 .vscode/
 .DS_Store
+
+# Local developer folders
+archive/
+backups/
