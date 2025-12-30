@@ -270,8 +270,8 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                                 cur.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
                                 cur.execute(f"RELEASE SAVEPOINT {sp_name}")
                             except Exception as sp_e:
-                                # If savepoint operations fail, log with context but continue
-                                logger.debug(f"Savepoint {sp_name} cleanup failed after insert error (original error: {inner_e}): {sp_e}")
+                                # If savepoint operations fail, this could indicate serious DB issues
+                                logger.warning(f"Savepoint {sp_name} cleanup failed after insert error (original error: {inner_e}): {sp_e}")
                     logger.info(f"  -> fallback completed: attempted {len(inserts_open)} open trades via per-row inserts, {fallback_count} executed successfully")
                 else:
                     raise
@@ -296,7 +296,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
 
     except Exception as e:
         conn.rollback()
-        logger.error("\n  -> ERROR during import, transaction rolled back:")
+        logger.error("ERROR during import, transaction rolled back:")
         logger.error(f"Exception: {str(e)}")
         logger.error(traceback.format_exc())
     finally:
@@ -340,8 +340,8 @@ def main():
                 SELECT indexname FROM pg_indexes WHERE indexname = 'uniq_open_trade_on_fields';
             """)
             if not cur.fetchone():
-                logger.warning("\nWARNING: 'uniq_open_trade_on_fields' index is missing! This can cause duplicates for open trades.")
-                logger.warning("Run create_unique_index.py to add this index for consistency.\n")
+                logger.warning("WARNING: 'uniq_open_trade_on_fields' index is missing! This can cause duplicates for open trades.")
+                logger.warning("Run create_unique_index.py to add this index for consistency.")
 
         for path in paths:
             process_file(conn, path, tz=args.tz, archive_dir=args.archive_dir, dry_run=args.dry_run)
