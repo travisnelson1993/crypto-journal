@@ -233,6 +233,8 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 msg = str(e).lower()
                 if "no unique or exclusion constraint matching the on conflict specification" in msg or isinstance(e, psycopg2.errors.InvalidColumnReference):
                     # Rollback only the failed bulk insert, preserving earlier close inserts
+                    # ROLLBACK TO SAVEPOINT undoes the bulk insert but keeps the savepoint alive
+                    # RELEASE SAVEPOINT destroys the savepoint to clean up
                     cur.execute("ROLLBACK TO SAVEPOINT open_bulk")
                     cur.execute("RELEASE SAVEPOINT open_bulk")
                     
@@ -261,8 +263,13 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                             fallback_count += 1
                         except Exception as inner_e:
                             # Rollback only this row's insert, continue with others
-                            cur.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
-                            cur.execute(f"RELEASE SAVEPOINT {sp_name}")
+                            # ROLLBACK TO SAVEPOINT undoes changes and keeps the savepoint alive
+                            # We don't need to RELEASE since we'll create a new savepoint with a different name
+                            try:
+                                cur.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                            except Exception as sp_e:
+                                # If rollback fails, log but continue
+                                logger.debug(f"Savepoint rollback failed: {sp_e}")
                 else:
                     raise
 
