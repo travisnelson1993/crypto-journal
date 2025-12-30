@@ -212,6 +212,8 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 )
                 for r in inserts_open
             ]
+            # Use a savepoint to preserve prior successful inserts (close rows)
+            cur.execute("SAVEPOINT bulk_open_insert")
             try:
                 execute_values(cur, """
                 INSERT INTO trades
@@ -219,21 +221,19 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 VALUES %s
                 ON CONFLICT (ticker, direction, entry_date, entry_price) DO NOTHING
                 """, vals, page_size=200)
+                # Success: release the savepoint
+                cur.execute("RELEASE SAVEPOINT bulk_open_insert")
                 print(f"  -> attempted insert {len(vals)} open trades (duplicates skipped)")
             except Exception as e:
+                # Rollback only the savepoint to preserve close inserts
+                cur.execute("ROLLBACK TO SAVEPOINT bulk_open_insert")
+                cur.execute("RELEASE SAVEPOINT bulk_open_insert")
                 # If Postgres rejects the ON CONFLICT target (no matching unique index),
                 # fall back to safe per-row INSERT ... WHERE NOT EXISTS
                 msg = str(e).lower()
                 if "no unique or exclusion constraint matching the on conflict specification" in msg or isinstance(e, psycopg2.errors.InvalidColumnReference):
                     print("  -> ON CONFLICT not supported for this target in this DB connection, falling back to safe per-row inserts.")
-                    # rollback the failed transaction before continuing
-                    conn.rollback()
-                    # recreate cursor for clean state
-                    try:
-                        cur.close()
-                    except:
-                        pass
-                    cur = conn.cursor()
+                    # Per-row fallback with savepoints for each row
                     fallback_count = 0
                     for r in inserts_open:
                         params = (
@@ -243,6 +243,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                             (r.get("source_filename") or ""), False,
                             r["ticker"], r["direction"], r["entry_date"], r["entry_price"]
                         )
+                        cur.execute("SAVEPOINT per_row_insert")
                         try:
                             cur.execute("""
                             INSERT INTO trades
@@ -252,17 +253,14 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                                 SELECT 1 FROM trades WHERE ticker = %s AND direction = %s AND entry_date = %s AND entry_price = %s AND end_date IS NULL
                             )
                             """, params)
+                            cur.execute("RELEASE SAVEPOINT per_row_insert")
                             fallback_count += 1
                         except Exception as inner_e:
-                            # rollback the single failed attempt and continue
-                            conn.rollback()
+                            # Rollback only this row's savepoint and continue
+                            cur.execute("ROLLBACK TO SAVEPOINT per_row_insert")
+                            cur.execute("RELEASE SAVEPOINT per_row_insert")
                             print("    -> per-row insert failed for", r["ticker"], r["entry_date"], "error:", inner_e)
-                            try:
-                                cur.close()
-                            except:
-                                pass
-                            cur = conn.cursor()
-                    print(f"  -> fallback attempted {len(inserts_open)} open trades (per-row), some may have been skipped or failed; fallback loop ran {fallback_count} executes")
+                    print(f"  -> fallback attempted {len(inserts_open)} open trades (per-row), successfully inserted {fallback_count} rows")
                 else:
                     raise
 
