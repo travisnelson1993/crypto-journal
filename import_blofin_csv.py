@@ -183,7 +183,76 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
             inserts_close.append(rec)
 
     try:
-        # Process close trades with robust matching logic
+        # Insert open trades first using ON CONFLICT on business key (fast path)
+        if inserts_open:
+            vals = [
+                (
+                    r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
+                    r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
+                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
+                    (r.get("source_filename") or ""), False
+                )
+                for r in inserts_open
+            ]
+            try:
+                execute_values(cur, """
+                INSERT INTO trades
+                (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
+                VALUES %s
+                ON CONFLICT (ticker, direction, entry_date, entry_price) DO NOTHING
+                """, vals, page_size=200)
+                print(f"  -> attempted insert {len(vals)} open trades (duplicates skipped)")
+            except Exception as e:
+                # If Postgres rejects the ON CONFLICT target (no matching unique index),
+                # fall back to safe per-row INSERT ... WHERE NOT EXISTS
+                msg = str(e).lower()
+                if "no unique or exclusion constraint matching the on conflict specification" in msg or isinstance(e, psycopg2.errors.InvalidColumnReference):
+                    print("  -> ON CONFLICT not supported for this target in this DB connection, falling back to safe per-row inserts.")
+                    # rollback the failed transaction before continuing
+                    conn.rollback()
+                    # recreate cursor for clean state
+                    try:
+                        cur.close()
+                    except:
+                        pass
+                    cur = conn.cursor()
+                    fallback_count = 0
+                    for r in inserts_open:
+                        params = (
+                            r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
+                            r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
+                            r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
+                            (r.get("source_filename") or ""), False,
+                            r["ticker"], r["direction"], r["entry_date"], r["entry_price"]
+                        )
+                        try:
+                            cur.execute("""
+                            INSERT INTO trades
+                            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
+                            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM trades WHERE ticker = %s AND direction = %s AND entry_date = %s AND entry_price = %s AND end_date IS NULL
+                            )
+                            """, params)
+                            fallback_count += 1
+                        except Exception as inner_e:
+                            # rollback the single failed attempt and continue
+                            conn.rollback()
+                            print("    -> per-row insert failed for", r["ticker"], r["entry_date"], "error:", inner_e)
+                            try:
+                                cur.close()
+                            except:
+                                pass
+                            cur = conn.cursor()
+                    print(f"  -> fallback attempted {len(inserts_open)} open trades (per-row), some may have been skipped or failed; fallback loop ran {fallback_count} executes")
+                    # Ensure cursor is valid after fallback loop (fix for cursor already closed bug)
+                    # If the last iteration had an error, cur might be newly created but we verify it's open
+                    if cur.closed:
+                        cur = conn.cursor()
+                else:
+                    raise
+
+        # Process close trades with robust matching logic (after opens are inserted)
         if inserts_close:
             close_applied = 0
             close_inserted = 0
@@ -257,75 +326,6 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
             print(f"  -> inserted {close_inserted} close trade rows (audit trail)")
             if orphan_inserted > 0:
                 print(f"  -> {orphan_inserted} orphan closes (no matching open trade)")
-
-        # Insert open trades using ON CONFLICT on business key (fast path)
-        if inserts_open:
-            vals = [
-                (
-                    r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
-                    r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                    r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
-                    (r.get("source_filename") or ""), False
-                )
-                for r in inserts_open
-            ]
-            try:
-                execute_values(cur, """
-                INSERT INTO trades
-                (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
-                VALUES %s
-                ON CONFLICT (ticker, direction, entry_date, entry_price) DO NOTHING
-                """, vals, page_size=200)
-                print(f"  -> attempted insert {len(vals)} open trades (duplicates skipped)")
-            except Exception as e:
-                # If Postgres rejects the ON CONFLICT target (no matching unique index),
-                # fall back to safe per-row INSERT ... WHERE NOT EXISTS
-                msg = str(e).lower()
-                if "no unique or exclusion constraint matching the on conflict specification" in msg or isinstance(e, psycopg2.errors.InvalidColumnReference):
-                    print("  -> ON CONFLICT not supported for this target in this DB connection, falling back to safe per-row inserts.")
-                    # rollback the failed transaction before continuing
-                    conn.rollback()
-                    # recreate cursor for clean state
-                    try:
-                        cur.close()
-                    except:
-                        pass
-                    cur = conn.cursor()
-                    fallback_count = 0
-                    for r in inserts_open:
-                        params = (
-                            r["ticker"], r["direction"], r["entry_price"], r["exit_price"],
-                            r["stop_loss"], r["leverage"], r["entry_date"], r["end_date"],
-                            r["entry_summary"], r["orphan_close"], r["source"], r["created_at"],
-                            (r.get("source_filename") or ""), False,
-                            r["ticker"], r["direction"], r["entry_date"], r["entry_price"]
-                        )
-                        try:
-                            cur.execute("""
-                            INSERT INTO trades
-                            (ticker, direction, entry_price, exit_price, stop_loss, leverage, entry_date, end_date, entry_summary, orphan_close, source, created_at, source_filename, is_duplicate)
-                            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                            WHERE NOT EXISTS (
-                                SELECT 1 FROM trades WHERE ticker = %s AND direction = %s AND entry_date = %s AND entry_price = %s AND end_date IS NULL
-                            )
-                            """, params)
-                            fallback_count += 1
-                        except Exception as inner_e:
-                            # rollback the single failed attempt and continue
-                            conn.rollback()
-                            print("    -> per-row insert failed for", r["ticker"], r["entry_date"], "error:", inner_e)
-                            try:
-                                cur.close()
-                            except:
-                                pass
-                            cur = conn.cursor()
-                    print(f"  -> fallback attempted {len(inserts_open)} open trades (per-row), some may have been skipped or failed; fallback loop ran {fallback_count} executes")
-                    # Ensure cursor is valid after fallback loop (fix for cursor already closed bug)
-                    # If the last iteration had an error, cur might be newly created but we verify it's open
-                    if cur.closed:
-                        cur = conn.cursor()
-                else:
-                    raise
 
         # Record the file as imported
         cur.execute("INSERT INTO imported_files (filename, file_hash) VALUES (%s, %s)", (os.path.basename(file_path), file_hash))
