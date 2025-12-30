@@ -227,6 +227,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                 ON CONFLICT (ticker, direction, entry_date, entry_price) DO NOTHING
                 """, vals, page_size=200)
                 cur.execute("RELEASE SAVEPOINT open_bulk")
+                logger.info(f"  -> inserted {len(vals)} open trades (duplicates skipped via ON CONFLICT)")
             except Exception as e:
                 # If Postgres rejects the ON CONFLICT target (no matching unique index),
                 # fall back to safe per-row INSERT ... WHERE NOT EXISTS
@@ -270,6 +271,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                             except Exception as sp_e:
                                 # If rollback fails, log but continue
                                 logger.debug(f"Savepoint rollback failed: {sp_e}")
+                    logger.info(f"  -> fallback completed: attempted {len(inserts_open)} open trades via per-row inserts, {fallback_count} executed successfully")
                 else:
                     raise
 
