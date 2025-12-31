@@ -1,7 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, Numeric, Enum, DateTime, ForeignKey
 )
-from sqlalchemy.orm import relationship
 from app.models.trade import Base
 from sqlalchemy.sql import func
 
