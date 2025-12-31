@@ -1,7 +1,7 @@
-# Python bytecode / caches
+﻿# Python bytecode / caches
 __pycache__/
 *.py[cod]
-*$py.class
+*.class
 
 # Virtual environments
 .venv/
@@ -12,6 +12,7 @@ env/
 # Backup files
 *.bak
 .git_backups/
+git_backups/
 
 # Secrets / environment files
 .env
@@ -58,3 +59,7 @@ secrets.json
 *.sql
 *.dump
 pgdata/
+
+# Project-specific local artifacts
+archive/
+scripts/show_trades.py

@@ -31,7 +31,8 @@ jobs:
           python -m pip install pytest pandas psycopg2-binary numpy
 
       - name: Run pytest (unit tests)
-        run: python -m pytest -q
+        # Run pytest in one bash-friendly line; ignore integration tests
+        run: python -m pytest -q --maxfail=1 --disable-warnings --ignore=tests/test_import_close_in_same_file.py --ignore=tests/test_import_integration.py
 
   integration:
     name: Integration tests (manual)
