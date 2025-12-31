@@ -1,13 +1,60 @@
-# Python
+# Python bytecode / caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 
-# Virtual environment
+# Virtual environments
 .venv/
+venv/
+ENV/
+env/
 
-# Secrets
+# Backup files
+*.bak
+.git_backups/
+
+# Secrets / environment files
 .env
+.env.* 
+.env.local
+.envrc
 
-# Editor / OS
+# IDEs / editors / OS
 .vscode/
+.idea/
+*.swp
+*~
 .DS_Store
+
+# Test / coverage
+.pytest_cache/
+.cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Packaging / dist
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Type checker caches
+.mypy_cache/
+.pyre/
+
+# Logs and databases
+*.log
+*.db
+*.sqlite3
+
+# Misc / secrets
+*.pem
+*.key
+secrets.json
+
+# PostgreSQL / SQL dumps (if any)
+*.sql
+*.dump
+pgdata/
