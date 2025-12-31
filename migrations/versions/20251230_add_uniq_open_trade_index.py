@@ -1,7 +1,7 @@
 ﻿"""add uniq_open_trade_on_fields index
 
 Revision ID: 20251230_add_uniq_open_trade_index
-Revises: 
+Revises:
 Create Date: 2025-12-30 00:00:00.000000
 """
 from alembic import op
@@ -15,15 +15,26 @@ depends_on = None
 
 
 def upgrade():
-    # Create a partial unique index for open trades so the ON CONFLICT target exists.
-    op.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS uniq_open_trade_on_fields
-        ON trades (ticker, direction, entry_date, entry_price)
-        WHERE end_date IS NULL;
-        """
-    )
+    # Create the partial unique index only if the trades table exists.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if 'trades' in inspector.get_table_names():
+        op.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_open_trade_on_fields
+            ON trades (ticker, direction, entry_date, entry_price)
+            WHERE end_date IS NULL;
+            """
+        )
+    else:
+        # trades table not present in this DB state — skip index creation.
+        # This keeps the migration safe when run in different order or on fresh DBs.
+        pass
 
 
 def downgrade():
-    op.execute("DROP INDEX IF EXISTS uniq_open_trade_on_fields;")
+    # Only attempt to drop the index if the table exists.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if 'trades' in inspector.get_table_names():
+        op.execute("DROP INDEX IF EXISTS uniq_open_trade_on_fields;")
