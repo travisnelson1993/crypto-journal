@@ -1,7 +1,25 @@
 ﻿from decimal import Decimal
 from datetime import datetime, timezone
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.db.database import Base
 from app.models.executions import Execution
 from app.services.matcher import fifo_match_close
+
+@pytest.fixture
+def session():
+    # Use an in-memory SQLite DB for isolated unit tests
+    engine = create_engine("sqlite:///:memory:", future=True)
+    # Create tables for the models (Base was added to app.db.database)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    sess = Session()
+    try:
+        yield sess
+    finally:
+        sess.close()
 
 def test_fifo_partial_close(session):
     open1 = Execution(
