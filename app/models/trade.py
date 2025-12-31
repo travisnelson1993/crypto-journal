@@ -1,10 +1,7 @@
 from datetime import datetime
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import String, Float, DateTime, func, Integer, Boolean
-
-
-class Base(DeclarativeBase):
-    pass
+from app.db.database import Base
 
 
 class Trade(Base):
