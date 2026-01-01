@@ -3,6 +3,11 @@
 Revision ID: 20260104_add_imported_files_and_convert_prices
 Revises: 20260103_create_uniq_open_trade_index_after_trades
 Create Date: 2026-01-01 00:00:00.000000
+
+NOTE: This migration is idempotent. It uses CREATE TABLE IF NOT EXISTS to allow
+re-running on a database where the table may already exist (e.g., if the schema
+was applied manually). If you've manually created the schema, you may need to
+run `alembic stamp head` to mark this migration as applied.
 """
 from alembic import op
 import sqlalchemy as sa
@@ -15,15 +20,16 @@ depends_on = None
 
 
 def upgrade():
-    # Create imported_files table
-    op.create_table(
-        "imported_files",
-        sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-        sa.Column("filename", sa.Text, nullable=False),
-        sa.Column("file_hash", sa.Text, nullable=False, unique=True),
-        sa.Column("source", sa.Text, nullable=True),
-        sa.Column("imported_at", sa.TIMESTAMP(timezone=True), server_default=sa.text("now()")),
-    )
+    # Create imported_files table (idempotent with IF NOT EXISTS)
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS imported_files (
+            id SERIAL PRIMARY KEY,
+            filename TEXT NOT NULL,
+            file_hash TEXT NOT NULL UNIQUE,
+            source TEXT,
+            imported_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+        );
+    """)
 
     # Convert numeric price columns to double precision (if present)
     # These will work if the columns currently exist as numeric; if already double precision this is a no-op.
