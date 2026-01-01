@@ -64,5 +64,5 @@ def downgrade():
     except Exception:
         pass
 
-    # Drop imported_files table
-    op.drop_table("imported_files")
+    # Drop imported_files table (idempotent with IF EXISTS)
+    op.execute("DROP TABLE IF EXISTS imported_files;")
