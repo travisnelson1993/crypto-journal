@@ -4,8 +4,9 @@ Revision ID: 20260104_add_imported_files_and_convert_prices
 Revises: 20260103_create_uniq_open_trade_index_after_trades
 Create Date: 2026-01-01 00:00:00.000000
 """
-from alembic import op
+
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy import inspect
 
 # revision identifiers, used by Alembic.

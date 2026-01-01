@@ -4,8 +4,9 @@ Revision ID: 20260103_create_uniq_open_trade_index_after_trades
 Revises: 20260102_create_trades_table
 Create Date: 2026-01-03 00:00:00.000000
 """
-from alembic import op
+
 import sqlalchemy as sa
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "20260103_create_uniq_open_trade_index_after_trades"

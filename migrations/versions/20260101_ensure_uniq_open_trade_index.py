@@ -4,8 +4,9 @@ Revision ID: 20260101_ensure_uniq_open_trade_index
 Revises: 20251231_merge_executions_and_uniq_open_trade_index
 Create Date: 2026-01-01 00:00:00.000000
 """
-from alembic import op
+
 import sqlalchemy as sa
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "20260101_ensure_uniq_open_trade_index"

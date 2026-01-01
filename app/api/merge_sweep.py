@@ -1,10 +1,13 @@
 # merge_sweep.py
 # Run once to attempt merging existing orphan closes into existing open trades.
 import asyncio
+
 from sqlalchemy import select
+
+from app.api.imports import merge_orphans_into_open
 from app.db.database import AsyncSessionLocal
 from app.models.trade import Trade
-from app.api.imports import merge_orphans_into_open
+
 
 async def sweep():
     async with AsyncSessionLocal() as session:
@@ -19,7 +22,10 @@ async def sweep():
             total_merged += res.get("merged_orphans", 0)
             total_closed_applied += res.get("closed_applied", 0)
         await session.commit()
-        print(f"Merge sweep complete. merged_orphans={total_merged}, closed_applied={total_closed_applied}")
+        print(
+            f"Merge sweep complete. merged_orphans={total_merged}, closed_applied={total_closed_applied}"
+        )
+
 
 if __name__ == "__main__":
     asyncio.run(sweep())
