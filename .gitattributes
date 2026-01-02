@@ -1,2 +1,1 @@
-﻿# Force LF for GitHub Actions workflow files to avoid bash script issues on linux runners
-.github/workflows/* text eol=lf
+﻿.gitattributes
