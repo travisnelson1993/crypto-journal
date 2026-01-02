@@ -121,7 +121,7 @@ jobs:
 
           echo "Postgres did not become ready after timeout"
           exit 1
-      - name: Run Alembic migrations (in disposable python container sharing Postgres network)
+      - name: Run migrations (in disposable python container sharing Postgres network)
         shell: bash
         run: |
           CID=$(docker ps -q --filter ancestor=postgres:15 | head -n 1)
@@ -138,9 +138,4 @@ jobs:
               pip install --no-cache-dir alembic psycopg2-binary
             fi
             python -m alembic upgrade head
-          "      - name: Run tests
-        shell: bash
-        run: pytest -q
-
-
-
+          "
