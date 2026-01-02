@@ -47,7 +47,7 @@ jobs:
       - name: Install pip dependencies
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) ; then pip install -r requirements.txt ; fi
+          if (Test-Path requirements.txt) ; then pip install -r requirements.txt ; fi`n          # ensure alembic and DB/test deps are present in the runner`n          pip install alembic psycopg2-binary pytest
 
       - name: Wait for Postgres to be ready
         run: |
@@ -77,3 +77,4 @@ jobs:
           # run migrations and the importer integration tests (change pytest args if needed)
           alembic upgrade head
           pytest -q tests/test_import_integration.py -k importer
+
