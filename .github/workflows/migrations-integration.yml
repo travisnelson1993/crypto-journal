@@ -27,7 +27,7 @@ jobs:
           --health-cmd "pg_isready -U postgres -d crypto_journal"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 20
+          --health-retries 60
 
     steps:
       - name: Checkout
@@ -51,7 +51,7 @@ jobs:
       - name: Wait for Postgres to be ready
         run: |
           echo "Waiting for Postgres to be ready..."
-          for i in $(seq 1 30); do
+          for i in $(seq 1 120); do
             if pg_isready -h localhost -p 5432 -U postgres -d crypto_journal; then
               echo "Postgres is ready"
               break
@@ -76,5 +76,6 @@ jobs:
           # run migrations and the importer integration tests (change pytest args if needed)
           alembic upgrade head
           pytest -q tests/test_import_integration.py -k importer
+
 
 
