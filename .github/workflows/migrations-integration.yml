@@ -22,13 +22,12 @@ jobs:
           POSTGRES_DB: crypto_journal
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
+        # ports mapping removed to avoid host port conflicts
         options: >-
           --health-cmd "pg_isready -U postgres -d crypto_journal"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 20
 
     steps:
       - name: Checkout
@@ -77,4 +76,5 @@ jobs:
           # run migrations and the importer integration tests (change pytest args if needed)
           alembic upgrade head
           pytest -q tests/test_import_integration.py -k importer
+
 

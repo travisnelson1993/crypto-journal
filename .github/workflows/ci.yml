@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -82,7 +82,7 @@ jobs:
           --health-cmd "pg_isready -U postgres -d crypto_journal"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 20
 
     steps:
       - name: Checkout
@@ -109,7 +109,7 @@ jobs:
       - name: Wait for Postgres
         run: |
           echo "Waiting for Postgres to be ready..."
-          for i in {1..30}; do
+          for i in {1..60}; do
             pg_isready -h localhost -p 5432 -U postgres -d crypto_journal && break
             echo "waiting for postgres..."
             sleep 1
@@ -143,7 +143,7 @@ jobs:
           --health-cmd "pg_isready -U postgres -d testdb"
           --health-interval 5s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 20
 
     steps:
       - name: Checkout
@@ -152,7 +152,7 @@ jobs:
       - name: Wait for Postgres
         run: |
           echo "Waiting for Postgres..."
-          for i in {1..30}; do
+          for i in {1..60}; do
             pg_isready -h localhost -p 5432 -U postgres -d testdb && break
             sleep 1
           done
@@ -184,3 +184,4 @@ jobs:
 
       - name: Run only integration test (importer)
         run: python -m pytest tests/test_import_integration.py -k importer -s -vv
+
