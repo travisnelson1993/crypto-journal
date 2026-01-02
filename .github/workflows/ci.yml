@@ -47,5 +47,6 @@ jobs:
             else
               pip install --no-cache-dir alembic psycopg2-binary
             fi
-            python -m alembic upgrade head
+            python -m alembic -c /work/alembic.ini upgrade head
           "
+
