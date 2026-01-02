@@ -5,7 +5,6 @@ Revises: 20260104_add_imported_files_and_convert_prices
 Create Date: 2026-01-05 00:00:00.000000
 """
 from alembic import op
-import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = "20260105_make_alembic_version_text"
