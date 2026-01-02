@@ -10,6 +10,9 @@ on:
       - "importers/**"
       - "requirements.txt"
 
+permissions:
+  contents: read
+
 jobs:
   migrations-and-tests:
     name: migrations + integration tests
