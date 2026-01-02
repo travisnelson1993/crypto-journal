@@ -1,10 +1,11 @@
-import os
+﻿import os
 import shutil
 import subprocess
 import sys
 import uuid
 
 import psycopg2
+import pytest
 
 
 def test_close_in_same_file_applies_update(tmp_path):
@@ -16,7 +17,8 @@ def test_close_in_same_file_applies_update(tmp_path):
       - verifies the BTCUSDT open was updated with the close from the same file.
     """
     dsn = os.getenv("CRYPTO_JOURNAL_DSN")
-    assert dsn, "CRYPTO_JOURNAL_DSN environment variable must be set for this test"
+    if not dsn:
+        pytest.skip("CRYPTO_JOURNAL_DSN environment variable must be set for this test")
 
     # Clean up any prior rows for this source so test is deterministic
     conn = psycopg2.connect(dsn)
@@ -32,13 +34,15 @@ def test_close_in_same_file_applies_update(tmp_path):
     finally:
         conn.close()
 
-    # Copy fixture to a temp file in tmp_path
+    # prepare a copy of the fixture so imports have a filename
     fixture = os.path.join("tests", "fixtures", "sample_order_history.csv")
-    assert os.path.exists(fixture), f"Fixture not found: {fixture}"
+    assert os.path.exists(
+        fixture
+    ), "Fixture not found: tests/fixtures/sample_order_history.csv"
+
     in_file = tmp_path / f"test-sample-{uuid.uuid4().hex[:8]}.csv"
     shutil.copy(fixture, in_file)
 
-    # Run importer as a subprocess, using the same python interpreter and env DSN
     env = os.environ.copy()
     env["CRYPTO_JOURNAL_DSN"] = dsn
     proc = subprocess.run(
@@ -61,8 +65,8 @@ def test_close_in_same_file_applies_update(tmp_path):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT exit_price, end_date FROM trades WHERE ticker = %s AND entry_price = %s ORDER BY created_at DESC LIMIT 1",
-                ("BTCUSDT", 85711.3),
+                "SELECT exit_price, end_date FROM trades WHERE ticker = %s AND source = %s LIMIT 1",
+                ("BTCUSDT", "blofin_order_history"),
             )
             row = cur.fetchone()
             assert row is not None, "Expected a trade row for BTCUSDT to exist"
