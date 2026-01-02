@@ -1,1 +1,9 @@
-﻿# (paste the entire ci.yml content from the block above here)
+﻿on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+# (paste the entire ci.yml content from the block above here)
+
