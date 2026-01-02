@@ -1,4 +1,5 @@
-﻿name: migrations + integration tests
+﻿# Migrations + integration tests (single-line-safe)
+name: migrations + integration tests
 
 on:
   pull_request:
@@ -44,9 +45,9 @@ jobs:
         shell: bash
         run: '[ -f requirements.txt ] && pip install -r requirements.txt || pip install alembic psycopg2-binary pytest'
 
-      - name: Install package
+      - name: Set PYTHONPATH for repo (so tests/imports work without packaging)
         shell: bash
-        run: pip install -e .
+        run: echo "PYTHONPATH=${PWD}" >> $GITHUB_ENV
 
       - name: Wait for Postgres
         shell: bash
