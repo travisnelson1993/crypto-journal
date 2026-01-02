@@ -1,0 +1,18 @@
+﻿# Enforce LF for Python source files
+*.py text eol=lf
+
+# Ensure common text files are normalized
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.txt text eol=lf
+
+# CI / workflow files
+*.yaml text eol=lf
+*.yml  text eol=lf
+
+# Keep binary files unchanged
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary

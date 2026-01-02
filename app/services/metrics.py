@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 
 def compute_sheet_metrics(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -68,11 +68,12 @@ def compute_sheet_metrics(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
         "gains_pct": round(sum(pnl_list), 2),
         "avg_return_pct": round(sum(pnl_list) / len(pnl_list), 2) if pnl_list else 0,
         "lev_gains_pct": round(sum(lev_pnl_list), 2),
-        "avg_return_lev_pct": round(sum(lev_pnl_list) / len(lev_pnl_list), 2) if lev_pnl_list else 0,
+        "avg_return_lev_pct": (
+            round(sum(lev_pnl_list) / len(lev_pnl_list), 2) if lev_pnl_list else 0
+        ),
         "total_rr": round(sum(rr_list), 2),
         "avg_rr": round(sum(rr_list) / len(rr_list), 2) if rr_list else 0,
         "largest_win_pct": round(max(pnl_list), 2) if pnl_list else 0,
         "largest_lev_win_pct": round(max(lev_pnl_list), 2) if lev_pnl_list else 0,
         "largest_rr_win": round(max(rr_list), 2) if rr_list else 0,
     }
-

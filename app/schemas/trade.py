@@ -22,9 +22,9 @@ class TradeOut(TradeCreate):
     id: int
 
     # Computed fields (Google Sheets-style)
-    status: Optional[str] = None            # PROFIT / BREAKEVEN / LOSS / OPEN
-    pnl_pct: Optional[float] = None         # K
-    lev_pnl_pct: Optional[float] = None     # L
-    rr: Optional[float] = None              # M
+    status: Optional[str] = None  # PROFIT / BREAKEVEN / LOSS / OPEN
+    pnl_pct: Optional[float] = None  # K
+    lev_pnl_pct: Optional[float] = None  # L
+    rr: Optional[float] = None  # M
 
     model_config = ConfigDict(from_attributes=True)
