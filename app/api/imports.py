@@ -1,11 +1,11 @@
-from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status, Query
-import csv
+﻿import csv
 import io
-from datetime import datetime
 import re
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, delete
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import AsyncSessionLocal
@@ -146,13 +146,15 @@ async def import_csv(
     created_trades = 0
     closed_trades = 0
     orphan_closes_created = 0
-    merged_orphans = 0
+    _merged_orphans = 0
 
     # Normalize rows
     for raw in reader:
         side_raw = raw.get("Side") or raw.get("side") or ""
         action, direction, close_reason = heuristic_from_side(side_raw)
-        symbol = (raw.get("Underlying Asset") or raw.get("Ticker") or raw.get("symbol") or "").strip()
+        symbol = (
+            raw.get("Underlying Asset") or raw.get("Ticker") or raw.get("symbol") or ""
+        ).strip()
         order_time = parse_datetime(raw.get("Order Time") or raw.get("Order Date"))
         avg_fill = parse_money(raw.get("Avg Fill"))
         filled_qty, filled_unit = parse_qty_unit(raw.get("Filled"))
@@ -197,7 +199,11 @@ async def import_csv(
             session.add(trade)
             created_trades += 1
         elif action == "CLOSE":
-            query = select(Trade).where(Trade.ticker == symbol, Trade.direction == direction, Trade.end_date.is_(None))
+            query = select(Trade).where(
+                Trade.ticker == symbol,
+                Trade.direction == direction,
+                Trade.end_date.is_(None),
+            )
             result = await session.execute(query)
             open_trade = result.scalars().first()
             if open_trade:

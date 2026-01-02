@@ -63,3 +63,7 @@ pgdata/
 # Project-specific local artifacts
 archive/
 scripts/show_trades.py
+
+# Importer logs
+importer_stdout.txt
+importer_stderr.txt

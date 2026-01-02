@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -34,7 +33,9 @@ async def monthly_stats(db: AsyncSession = Depends(get_db)) -> List[Dict[str, An
     - performance stats: only count CLOSED trades (exit_price is not None)
     - R:R is SIGNED (losers negative) and matches your Google Sheets formulas
     """
-    result = await db.execute(select(Trade).order_by(Trade.entry_date.asc(), Trade.id.asc()))
+    result = await db.execute(
+        select(Trade).order_by(Trade.entry_date.asc(), Trade.id.asc())
+    )
     trades = result.scalars().all()
 
     buckets: Dict[str, List[Trade]] = defaultdict(list)
@@ -83,7 +84,7 @@ async def monthly_stats(db: AsyncSession = Depends(get_db)) -> List[Dict[str, An
 
         # Sheet formulas:
         # Win Rate % = wins / (wins + losses)
-        denom = (wins + losses)
+        denom = wins + losses
         win_rate_pct = _round2((wins / denom) * 100.0) if denom > 0 else 0.0
 
         # Gains % = SUM(K)
@@ -96,7 +97,9 @@ async def monthly_stats(db: AsyncSession = Depends(get_db)) -> List[Dict[str, An
         lev_gains_pct = _round2(sum(lev_pnl_list)) if lev_pnl_list else 0.0
 
         # Avg. Return (Lev.) = AVERAGE(L)
-        avg_return_lev_pct = _round2(sum(lev_pnl_list) / len(lev_pnl_list)) if lev_pnl_list else 0.0
+        avg_return_lev_pct = (
+            _round2(sum(lev_pnl_list) / len(lev_pnl_list)) if lev_pnl_list else 0.0
+        )
 
         # Total R:R = SUM(M)
         total_rr = _round2(sum(rr_list)) if rr_list else 0.0
@@ -135,4 +138,3 @@ async def monthly_stats(db: AsyncSession = Depends(get_db)) -> List[Dict[str, An
         )
 
     return out
-
