@@ -1,9 +1,118 @@
-﻿on:
+﻿name: CI
+
+on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
 
-# (paste the entire ci.yml content from the block above here)
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: crypto_journal
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd="pg_isready -U postgres -d crypto_journal"
+          --health-interval=5s
+          --health-timeout=2s
+          --health-retries=60
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/crypto_journal
+      CRYPTO_JOURNAL_DSN: postgresql://postgres:postgres@postgres:5432/crypto_journal
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install system deps & upgrade pip (single-line)
+        shell: bash
+        run: sudo apt-get update -y && sudo apt-get install -y postgresql-client && python -m pip install --upgrade pip
+
+      - name: Install Python dependencies (single-line conditional)
+        shell: bash
+        run: '[ -f requirements.txt ] && pip install -r requirements.txt || pip install alembic psycopg2-binary pytest'
+
+      - name: Set PYTHONPATH for repo (so tests/imports work without packaging)
+        shell: bash
+        run: echo "PYTHONPATH=${PWD}" >> $GITHUB_ENV
+
+      - name: Debug Postgres connectivity (temporary; remove when stable)
+        shell: bash
+        run: |
+          echo "DATABASE_URL=${DATABASE_URL}"
+          ss -lntp || netstat -lntp || true
+          pg_isready -h 127.0.0.1 -p 5432 -U postgres -d crypto_journal || true
+          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d crypto_journal -c '\l' || true
+
+      - name: Wait for Postgres (try localhost and container host; with debug)
+        shell: bash
+        run: |
+          echo "Checking network listeners (ss/netstat)..."
+          ss -lntp || netstat -lntp || true
+          echo "Listing docker containers (limited)..."
+          docker ps --no-trunc --format "table {{.ID}}\t{{.Image}}\t{{.Names}}\t{{.Status}}" || true
+
+          echo "Waiting for Postgres to be ready (will try 120s)..."
+          for i in $(seq 1 120); do
+            echo "Attempt $i..."
+            if pg_isready -h 127.0.0.1 -p 5432 -U postgres -d crypto_journal >/dev/null 2>&1; then
+              echo "Postgres is ready on 127.0.0.1"
+              exit 0
+            fi
+            if pg_isready -h postgres -p 5432 -U postgres -d crypto_journal >/dev/null 2>&1; then
+              echo "Postgres is ready on host 'postgres'"
+              exit 0
+            fi
+            if PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d crypto_journal -c '\l' >/dev/null 2>&1; then
+              echo "psql connected via 127.0.0.1"
+              exit 0
+            fi
+            if PGPASSWORD=postgres psql -h postgres -U postgres -d crypto_journal -c '\l' >/dev/null 2>&1; then
+              echo "psql connected via host 'postgres'"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Final debug: docker logs for the postgres container (show up to 500 lines)"
+          CID=$(docker ps -q --filter ancestor=postgres:15 | head -n 1)
+          if [ -n "$CID" ]; then
+            docker logs --tail 500 "$CID" || true
+          else
+            echo "No postgres container found by ancestor filter; listing all docker ps:"
+            docker ps -a --no-trunc || true
+          fi
+
+          echo "Postgres did not become ready after timeout"
+          exit 1
+
+      - name: Run Alembic migrations
+        shell: bash
+        run: python -m alembic upgrade head
+
+      - name: Run tests
+        shell: bash
+        run: pytest -q
