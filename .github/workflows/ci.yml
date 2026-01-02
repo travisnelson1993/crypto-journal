@@ -27,8 +27,8 @@ jobs:
           --health-retries=60
 
     env:
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/crypto_journal
-      CRYPTO_JOURNAL_DSN: postgresql://postgres:postgres@127.0.0.1:5432/crypto_journal
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/crypto_journal
+      CRYPTO_JOURNAL_DSN: postgresql://postgres:postgres@postgres:5432/crypto_journal
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
     steps:
@@ -120,4 +120,5 @@ jobs:
       - name: Run tests
         shell: bash
         run: pytest -q
+
 
