@@ -47,22 +47,20 @@ jobs:
             else
               pip install --no-cache-dir alembic psycopg2-binary
             fi
-            echo "---- debug: list /work ----"
-ls -la /work || true
-echo "---- debug: head of /work/alembic.ini ----"
-if [ -f /work/alembic.ini ]; then sed -n "1,200p" /work/alembic.ini || cat /work/alembic.ini; else echo "/work/alembic.ini not found"; fi
-echo "---- debug: migrations dir ----"
-if [ -d /work/migrations ]; then ls -la /work/migrations || true; else echo "/work/migrations not found"; fi
-echo "---- debug: python & pip info ----"
-python --version || true
-pip --version || true
-echo "---- running pip install & alembic ----"
-if [ -f requirements.txt ]; then
-  pip install --no-cache-dir -r requirements.txt
-else
-  pip install --no-cache-dir alembic psycopg2-binary
-fi
-python -m alembic -c /work/alembic.ini upgrade head
+            echo '---- debug: list /work ----'
+            ls -la /work || true
+            echo '---- debug: head of /work/alembic.ini ----'
+            if [ -f /work/alembic.ini ]; then sed -n '1,200p' /work/alembic.ini || cat /work/alembic.ini; else echo '/work/alembic.ini not found'; fi
+            echo '---- debug: migrations dir ----'
+            if [ -d /work/migrations ]; then ls -la /work/migrations || true; else echo '/work/migrations not found'; fi
+            echo '---- debug: python & pip info ----'
+            python --version || true
+            pip --version || true
+            echo '---- running pip install & alembic ----'
+            if [ -f requirements.txt ]; then
+              pip install --no-cache-dir -r requirements.txt
+            else
+              pip install --no-cache-dir alembic psycopg2-binary
+            fi
+            python -m alembic -c /work/alembic.ini upgrade head
           "
-
-
