@@ -1,1 +1,5 @@
-﻿<PASTE THE YAML BLOCK ABOVE HERE EXACTLY AS-SHOWN (including leading spaces)>
+﻿on:
+  workflow_dispatch:
+
+<PASTE THE YAML BLOCK ABOVE HERE EXACTLY AS-SHOWN (including leading spaces)>
+
