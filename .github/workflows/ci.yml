@@ -44,21 +44,15 @@ jobs:
           fi
 
       - name: Run Alembic migrations
-        run: |
-          python - <<EOF
-import os
-from alembic.config import Config
-from alembic import command
-
-cfg = Config("alembic.ini")
-
-db_url = os.environ.get("DATABASE_URL") or os.environ.get("CRYPTO_JOURNAL_DSN")
-if not db_url:
-    raise SystemExit("DATABASE_URL not set")
-
-cfg.set_main_option("sqlalchemy.url", db_url)
-command.upgrade(cfg, "head")
-EOF
+        run: >
+          python -c "import os;
+          from alembic.config import Config;
+          from alembic import command;
+          cfg = Config('alembic.ini');
+          db = os.environ.get('DATABASE_URL') or os.environ.get('CRYPTO_JOURNAL_DSN');
+          assert db, 'DATABASE_URL not set';
+          cfg.set_main_option('sqlalchemy.url', db);
+          command.upgrade(cfg, 'head')"
 
       - name: Run tests
         run: |
