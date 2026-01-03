@@ -67,3 +67,4 @@ scripts/show_trades.py
 # Importer logs
 importer_stdout.txt
 importer_stderr.txt
+run-*-log.txt
