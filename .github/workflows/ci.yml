@@ -31,8 +31,9 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
     steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Run migrations (in disposable python container sharing Postgres network)
         shell: bash
         run: |
@@ -66,5 +67,3 @@ jobs:
             fi
             python -m alembic -c /work/alembic.ini upgrade head
           "
-
-
