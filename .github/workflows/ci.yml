@@ -45,37 +45,4 @@ jobs:
             pip install --no-cache-dir -r requirements.txt
           fi
 
-      - name: Run Alembic migrations
-        run: |
-          set -e
-
-          echo "---- debug: workspace ----"
-          ls -la
-
-          echo "---- debug: alembic.ini ----"
-          sed -n '1,200p' alembic.ini
-
-          echo "---- debug: migrations dir ----"
-          ls -la migrations
-
-          python - <<'PY'
-import os
-from alembic.config import Config
-from alembic import command
-
-cfg = Config("alembic.ini")
-
-db_url = os.environ.get("DATABASE_URL") or os.environ.get("CRYPTO_JOURNAL_DSN")
-if not db_url:
-    raise SystemExit("DATABASE_URL / CRYPTO_JOURNAL_DSN not set")
-
-cfg.set_main_option("sqlalchemy.url", db_url)
-
-print("Running alembic upgrade head")
-command.upgrade(cfg, "head")
-PY
-
-      - name: Run tests
-        run: |
-          pip install pytest
-          pytest -q
+      - name: Run Alembic mi
