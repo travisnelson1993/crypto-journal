@@ -43,7 +43,9 @@ jobs:
 
           echo "Running alembic inside a disposable python container sharing network namespace with Postgres ($CID)..."
           docker run --rm \
-            --network container:$CID \
+            --network host \
+            -e DATABASE_URL="${DATABASE_URL}" \
+            -e CRYPTO_JOURNAL_DSN="${CRYPTO_JOURNAL_DSN}" \
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /work \
             python:3.11 \
