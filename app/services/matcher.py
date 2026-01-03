@@ -1,20 +1,25 @@
-﻿from decimal import Decimal
-from sqlalchemy import select
+﻿from sqlalchemy import select
+
 from app.models.executions import Execution, ExecutionMatch
+
 
 def fifo_match_close(session, close_exec: Execution):
     remaining = close_exec.remaining_qty
 
-    opens = session.execute(
-        select(Execution)
-        .where(
-            Execution.ticker == close_exec.ticker,
-            Execution.direction == close_exec.direction,
-            Execution.side == "OPEN",
-            Execution.remaining_qty > 0,
+    opens = (
+        session.execute(
+            select(Execution)
+            .where(
+                Execution.ticker == close_exec.ticker,
+                Execution.direction == close_exec.direction,
+                Execution.side == "OPEN",
+                Execution.remaining_qty > 0,
+            )
+            .order_by(Execution.timestamp.asc(), Execution.id.asc())
         )
-        .order_by(Execution.timestamp.asc(), Execution.id.asc())
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     for open_exec in opens:
         if remaining <= 0:

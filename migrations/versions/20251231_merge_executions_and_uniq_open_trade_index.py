@@ -5,8 +5,6 @@ Revises: 0001_add_executions_model, 20251230_add_uniq_open_trade_index
 Create Date: 2025-12-31 00:00:00.000000
 
 """
-from alembic import op
-import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = "20251231_merge_executions_and_uniq_open_trade_index"

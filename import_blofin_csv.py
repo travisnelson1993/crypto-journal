@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Import Blofin CSV(s) into the trades table.
 
@@ -18,6 +18,7 @@ import shutil
 import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo  # Python 3.9+
+
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
@@ -92,7 +93,13 @@ def ensure_imported_files_table(cur):
 
 
 def find_open_trade_and_update(
-    cur, ticker, direction, close_price, close_dt, entry_price=None, price_tolerance=0.0001
+    cur,
+    ticker,
+    direction,
+    close_price,
+    close_dt,
+    entry_price=None,
+    price_tolerance=0.0001,
 ):
     """
     Find the most-recent open trade for the same ticker/direction (exit_price IS NULL and entry_date <= close_dt)
@@ -101,7 +108,7 @@ def find_open_trade_and_update(
     Important:
       - This function updates the existing open trade but deliberately does NOT overwrite
         source_filename or created_at (so we preserve provenance).
-      - It also does not prevent inserting a separate close-row — callers can still insert a close record.
+      - It also does not prevent inserting a separate close-row â€” callers can still insert a close record.
     Returns True if an existing open trade was updated, False otherwise.
     """
     cur.execute(
@@ -140,7 +147,14 @@ def find_open_trade_and_update(
             is_duplicate = %s
         WHERE id = %s
         """,
-        (close_price, close_dt, f"Imported: Close @ {close_price}", False, False, trade_id),
+        (
+            close_price,
+            close_dt,
+            f"Imported: Close @ {close_price}",
+            False,
+            False,
+            trade_id,
+        ),
     )
     return cur.rowcount > 0
 
@@ -165,7 +179,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
 
     try:
         cur.close()
-    except:
+    except Exception:
         pass
     cur = conn.cursor()
 
@@ -192,7 +206,9 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
         ticker = ticker.strip() if isinstance(ticker, str) else ticker
 
         leverage = row.get("Leverage")
-        leverage_val = int(leverage) if pd.notna(leverage) and str(leverage).strip() != "" else 1
+        leverage_val = (
+            int(leverage) if pd.notna(leverage) and str(leverage).strip() != "" else 1
+        )
         order_time = row.get("Order Time")
         entry_date = parse_datetime(order_time, tz=tz)
         side = row.get("Side", "")
@@ -200,7 +216,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
         status = row.get("Status", "")
 
         action, direction, reason = infer_action_and_direction(side)
-        open_flag = (action == "OPEN")
+        open_flag = action == "OPEN"
         entry_summary = make_entry_summary(side, status)
 
         rec = {
@@ -269,7 +285,8 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
             except Exception as e:
                 msg = str(e).lower()
                 if (
-                    "no unique or exclusion constraint matching the on conflict specification" in msg
+                    "no unique or exclusion constraint matching the on conflict specification"
+                    in msg
                     or isinstance(e, psycopg2.errors.InvalidColumnReference)
                 ):
                     # Roll back only the bulk attempt so prior inserts stay
@@ -282,14 +299,14 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                             pass
                         try:
                             cur.close()
-                        except:
+                        except Exception:
                             pass
                         cur = conn.cursor()
 
                     # per-row fallback (each row inside its own savepoint)
                     try:
                         cur.close()
-                    except:
+                    except Exception:
                         pass
                     cur = conn.cursor()
 
@@ -346,7 +363,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                                     pass
                                 try:
                                     cur.close()
-                                except:
+                                except Exception:
                                     pass
                                 cur = conn.cursor()
                             # continue to next row
@@ -423,7 +440,7 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     finally:
         try:
             cur.close()
-        except:
+        except Exception:
             pass
 
 
@@ -437,16 +454,45 @@ def gather_input_paths(input_arg):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--input", "-i", required=True, help="File path, glob, or directory containing CSV(s)")
-    p.add_argument("--db", "-d", required=False, default=None, help="psycopg2 DSN (overrides CRYPTO_JOURNAL_DSN env var)")
-    p.add_argument("--archive-dir", "-a", required=False, default=None, help="Move processed files here")
-    p.add_argument("--tz", "-t", required=False, default=None, help="Timezone of CSV timestamps (e.g. America/Los_Angeles). If set, times will be converted to UTC.")
-    p.add_argument("--dry-run", action="store_true", help="Simulate the import without making any changes to the database")
+    p.add_argument(
+        "--input",
+        "-i",
+        required=True,
+        help="File path, glob, or directory containing CSV(s)",
+    )
+    p.add_argument(
+        "--db",
+        "-d",
+        required=False,
+        default=None,
+        help="psycopg2 DSN (overrides CRYPTO_JOURNAL_DSN env var)",
+    )
+    p.add_argument(
+        "--archive-dir",
+        "-a",
+        required=False,
+        default=None,
+        help="Move processed files here",
+    )
+    p.add_argument(
+        "--tz",
+        "-t",
+        required=False,
+        default=None,
+        help="Timezone of CSV timestamps (e.g. America/Los_Angeles). If set, times will be converted to UTC.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Simulate the import without making any changes to the database",
+    )
     args = p.parse_args()
 
     dsn = args.db or os.getenv("CRYPTO_JOURNAL_DSN")
     if not dsn:
-        raise SystemExit("DB connection string required: use --db or set CRYPTO_JOURNAL_DSN env var")
+        raise SystemExit(
+            "DB connection string required: use --db or set CRYPTO_JOURNAL_DSN env var"
+        )
 
     paths = gather_input_paths(args.input)
     if not paths:
@@ -465,10 +511,18 @@ def main():
                 print(
                     "\nWARNING: 'uniq_open_trade_on_fields' index is missing! This can cause duplicates for open trades."
                 )
-                print("Run create_unique_index.py or apply migrations to add this index for consistency.\n")
+                print(
+                    "Run create_unique_index.py or apply migrations to add this index for consistency.\n"
+                )
 
         for path in paths:
-            process_file(conn, path, tz=args.tz, archive_dir=args.archive_dir, dry_run=args.dry_run)
+            process_file(
+                conn,
+                path,
+                tz=args.tz,
+                archive_dir=args.archive_dir,
+                dry_run=args.dry_run,
+            )
     finally:
         conn.close()
 
