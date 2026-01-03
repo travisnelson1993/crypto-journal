@@ -34,7 +34,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run migrations (in disposable python container sharing Postgres network)
+      - name: Run migrations (safe heredoc version)
         shell: bash
         run: |
           set -e
@@ -45,14 +45,12 @@ jobs:
             exit 1
           fi
 
-          echo "Running alembic inside disposable python container sharing Postgres network ($CID)"
-
           docker run --rm \
             --network container:$CID \
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /work \
             python:3.11 \
-            bash -lc "
+            bash -s <<'BASH'
               set -e
 
               if [ -f requirements.txt ]; then
@@ -60,27 +58,6 @@ jobs:
               fi
 
               pip install --no-cache-dir alembic psycopg2-binary
-
-              echo '---- debug: list /work ----'
-              ls -la /work || true
-
-              echo '---- debug: head of alembic.ini ----'
-              if [ -f alembic.ini ]; then
-                sed -n '1,200p' alembic.ini
-              else
-                echo 'alembic.ini not found'
-              fi
-
-              echo '---- debug: migrations dir ----'
-              if [ -d migrations ]; then
-                ls -la migrations
-              else
-                echo 'migrations dir not found'
-              fi
-
-              echo '---- debug: python & pip ----'
-              python --version
-              pip --version
 
               python - <<'PY'
 import os
@@ -90,14 +67,11 @@ from alembic import command
 cfg = Config('/work/alembic.ini')
 
 if not cfg.get_main_option('sqlalchemy.url'):
-    db_url = (
-        os.environ.get('DATABASE_URL')
-        or os.environ.get('CRYPTO_JOURNAL_DSN')
-    )
+    db_url = os.environ.get('DATABASE_URL') or os.environ.get('CRYPTO_JOURNAL_DSN')
     if not db_url:
         raise SystemExit('DATABASE_URL/CRYPTO_JOURNAL_DSN not set')
     cfg.set_main_option('sqlalchemy.url', db_url)
 
 command.upgrade(cfg, 'head')
 PY
-            "
+BASH
