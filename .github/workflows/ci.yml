@@ -31,6 +31,8 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
     steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
       - name: Run migrations (in disposable python container sharing Postgres network)
         shell: bash
         run: |
@@ -40,7 +42,7 @@ jobs:
             exit 1
           fi
           echo "Running alembic inside a disposable python container sharing network namespace with Postgres ($CID)..."
-          docker run --rm --network container:$CID -v "${PWD}:/work" -w /work python:3.11 bash -lc "
+          docker run --rm --network container:$CID -v "${GITHUB_WORKSPACE}:/work" -w /work python:3.11 bash -lc "
             set -e
             if [ -f requirements.txt ]; then
               pip install --no-cache-dir -r requirements.txt
