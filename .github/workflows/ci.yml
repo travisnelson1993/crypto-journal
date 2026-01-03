@@ -29,20 +29,38 @@ jobs:
       CRYPTO_JOURNAL_DSN: postgresql://postgres:postgres@localhost:5432/crypto_journal
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --no-cache-dir alembic psycopg2-binary
+          pip install alembic psycopg2-binary
           if [ -f requirements.txt ]; then
-            pip install --no-cache-dir -r requirements.txt
+            pip install -r requirements.txt
           fi
 
-      - name: Run Alembic mi
+      - name: Run Alembic migrations
+        run: |
+          python - <<EOF
+import os
+from alembic.config import Config
+from alembic import command
+
+cfg = Config("alembic.ini")
+
+db_url = os.environ.get("DATABASE_URL") or os.environ.get("CRYPTO_JOURNAL_DSN")
+if not db_url:
+    raise SystemExit("DATABASE_URL not set")
+
+cfg.set_main_option("sqlalchemy.url", db_url)
+command.upgrade(cfg, "head")
+EOF
+
+      - name: Run tests
+        run: |
+          pip install pytest
+          pytest -q
