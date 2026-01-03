@@ -1,1 +1,86 @@
-﻿# (Paste the entire YAML content from the "Corrected file" block above — including the PY heredoc and closing PY)
+﻿name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: crypto_journal
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd="pg_isready -U postgres -d crypto_journal"
+          --health-interval=5s
+          --health-timeout=2s
+          --health-retries=60
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/crypto_journal
+      CRYPTO_JOURNAL_DSN: postgresql://postgres:postgres@postgres:5432/crypto_journal
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run migrations (in disposable python container sharing Postgres network)
+        shell: bash
+        run: |
+          CID=$(docker ps -q --filter ancestor=postgres:15 | head -n 1)
+          if [ -z "$CID" ]; then
+            echo "Postgres container not found" >&2
+            exit 1
+          fi
+
+          echo "Running alembic inside a disposable python container sharing network namespace with Postgres ($CID)..."
+          docker run --rm --network container:$CID -v "${GITHUB_WORKSPACE}:/work" -w /work python:3.11 bash -lc "
+            set -e
+
+            # install project dependencies if present
+            if [ -f requirements.txt ]; then
+              pip install --no-cache-dir -r requirements.txt
+            fi
+
+            # always ensure alembic + DB driver are present for migrations
+            pip install --no-cache-dir alembic psycopg2-binary
+
+            echo '---- debug: list /work ----'
+            ls -la /work || true
+
+            echo '---- debug: head of /work/alembic.ini ----'
+            if [ -f /work/alembic.ini ]; then sed -n '1,200p' /work/alembic.ini || cat /work/alembic.ini; else echo '/work/alembic.ini not found'; fi
+
+            echo '---- debug: migrations dir ----'
+            if [ -d /work/migrations ]; then ls -la /work/migrations || true; else echo '/work/migrations not found'; fi
+
+            echo '---- debug: python & pip info ----'
+            python --version || true
+            pip --version || true
+
+            # Run alembic, injecting sqlalchemy.url from the CI env if not set in alembic.ini
+            python - <<'PY'
+import os
+from alembic.config import Config
+from alembic import command
+
+cfg = Config('/work/alembic.ini')
+if not cfg.get_main_option('sqlalchemy.url'):
+    db_url = os.environ.get('DATABASE_URL') or os.environ.get('CRYPTO_JOURNAL_DSN')
+    if not db_url:
+        raise SystemExit('DATABASE_URL/CRYPTO_JOURNAL_DSN not set')
+    cfg.set_main_option('sqlalchemy.url', db_url)
+
+command.upgrade(cfg, 'head')
+PY
+          "
