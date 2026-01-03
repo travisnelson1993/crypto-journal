@@ -10,7 +10,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "20251230_add_uniq_open_trade_index"
-down_revision = None
+down_revision = "85d3a180c766"
 branch_labels = None
 depends_on = None
 
