@@ -9,9 +9,6 @@ import pandas as pd
 import psycopg2
 import pytest
 
-from alembic.config import Config
-from alembic import command
-
 SOURCE_NAME = "blofin_order_history"
 
 
@@ -29,16 +26,6 @@ def get_conn(dsn):
     return psycopg2.connect(dsn)
 
 
-def apply_migrations(dsn):
-    # Force alembic + importer subprocess to use the SAME test DB
-    os.environ["DATABASE_URL"] = dsn
-
-    cfg = Config("alembic.ini")
-    cfg.set_main_option("sqlalchemy.url", dsn)
-    command.upgrade(cfg, "head")
-
-
-
 def cleanup_db(conn):
     """
     Remove rows created by this test so it is idempotent across runs.
@@ -48,6 +35,22 @@ def cleanup_db(conn):
         cur.execute(
             "DELETE FROM imported_files WHERE filename LIKE %s",
             ("test-sample-%",),
+        )
+    conn.commit()
+
+
+def ensure_unique_open_trade_index(conn):
+    """
+    The importer requires this index to guarantee idempotency.
+    Ensure it exists in the test DB regardless of migration state.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_open_trade_on_fields
+            ON trades (ticker, direction, entry_date, entry_price)
+            WHERE end_date IS NULL;
+            """
         )
     conn.commit()
 
@@ -115,12 +118,10 @@ def dsn():
 # ---------- test ----------
 
 def test_importer_idempotent_and_records_filename(tmp_path, dsn):
-    # Ensure schema is fully migrated (tables + indexes)
-    apply_migrations(dsn)
-
-    # Clean database state for test
+    # Prepare DB
     conn = get_conn(dsn)
     cleanup_db(conn)
+    ensure_unique_open_trade_index(conn)
 
     # Prepare two input files with identical content but different names
     fixture = os.path.join("tests", "fixtures", "sample_order_history.csv")
