@@ -30,13 +30,13 @@ def get_conn(dsn):
 
 
 def apply_migrations(dsn):
-    """
-    Ensure the test database schema matches production.
-    This guarantees tables + unique indexes exist before importing.
-    """
+    # Force alembic + importer subprocess to use the SAME test DB
+    os.environ["DATABASE_URL"] = dsn
+
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", dsn)
     command.upgrade(cfg, "head")
+
 
 
 def cleanup_db(conn):
