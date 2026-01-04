@@ -4,17 +4,17 @@ CREATE TABLE IF NOT EXISTS trades (
   id SERIAL PRIMARY KEY,
   ticker TEXT NOT NULL,
   direction TEXT,
-  entry_date TIMESTAMP,
   entry_price DOUBLE PRECISION,
   exit_price DOUBLE PRECISION,
   stop_loss DOUBLE PRECISION,
   leverage INTEGER DEFAULT 1 NOT NULL,
+  entry_date TIMESTAMP,
   end_date TIMESTAMP,
   entry_summary TEXT,
   orphan_close BOOLEAN DEFAULT false NOT NULL,
   source TEXT,
-  source_filename TEXT,
   created_at TIMESTAMP DEFAULT now() NOT NULL,
+  source_filename TEXT,
   is_duplicate BOOLEAN DEFAULT false NOT NULL
 );
 
