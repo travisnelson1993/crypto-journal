@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -25,6 +26,7 @@ jobs:
           --health-retries=60
 
     env:
+      PYTHONPATH: .
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/crypto_journal
       CRYPTO_JOURNAL_DSN: postgresql://postgres:postgres@localhost:5432/crypto_journal
 
@@ -56,5 +58,6 @@ jobs:
 
       - name: Run tests
         run: |
-          pip install pytest
+          pip install pytest pandas
           pytest -q
+
