@@ -118,16 +118,15 @@ def dsn():
 # ---------- test ----------
 
 def test_importer_idempotent_and_records_filename(tmp_path, dsn):
-    # Prepare DB
+    # --- Prepare DB (setup phase) ---
     conn = get_conn(dsn)
     cleanup_db(conn)
     ensure_unique_open_trade_index(conn)
+    conn.close()  # IMPORTANT: close setup connection before importer runs
 
-    # Prepare two input files with identical content but different names
+    # --- Prepare two input files with identical content but different names ---
     fixture = os.path.join("tests", "fixtures", "sample_order_history.csv")
-    assert os.path.exists(
-        fixture
-    ), "Fixture not found: tests/fixtures/sample_order_history.csv"
+    assert os.path.exists(fixture), "Fixture not found: tests/fixtures/sample_order_history.csv"
 
     in1 = tmp_path / f"test-sample-{uuid.uuid4().hex[:8]}-a.csv"
     in2 = tmp_path / f"test-sample-{uuid.uuid4().hex[:8]}-b.csv"
@@ -138,15 +137,15 @@ def test_importer_idempotent_and_records_filename(tmp_path, dsn):
     df = pd.read_csv(fixture, dtype=str)
     expected_rows = len(df)
 
-    # Run importer on first file
+    # --- Run importer on first file ---
     run_importer(in1, dsn)
 
-    # Verify rows inserted
+    # --- Verify rows inserted ---
     conn = get_conn(dsn)
     first_count = count_trades(conn)
-    assert (
-        first_count == expected_rows
-    ), f"expected {expected_rows} rows after first import, got {first_count}"
+    assert first_count == expected_rows, (
+        f"expected {expected_rows} rows after first import, got {first_count}"
+    )
 
     # Verify imported_files recorded exactly once
     h1 = file_sha256(in1)
@@ -157,14 +156,16 @@ def test_importer_idempotent_and_records_filename(tmp_path, dsn):
     assert all(f is not None for f in filenames)
     assert os.path.basename(str(in1)) in filenames
 
-    # Run importer again with identical contents but different filename
+    conn.close()
+
+    # --- Run importer again with identical contents but different filename ---
     run_importer(in2, dsn)
 
-    # Row count should not change (idempotency)
+    # --- Verify idempotency ---
+    conn = get_conn(dsn)
     second_count = count_trades(conn)
     assert second_count == first_count
 
-    # imported_files should still contain only one entry for that hash
     assert imported_file_count_by_hash(conn, h1) == 1
 
     # Cleanup so test is repeatable
