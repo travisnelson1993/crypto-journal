@@ -7,12 +7,11 @@ from sqlalchemy import engine_from_config, pool
 config = context.config
 fileConfig(config.config_file_name)
 
-# Import your application's Base metadata here.
-# Adjust this import if your Base lives elsewhere.
+# Import ONLY metadata (no engine, no async)
 try:
-    from app.db.database import Base
+    from app.db.models import Base
 except Exception as e:
-    raise ImportError(f"Failed to import Base from app.db.database: {e}")
+    raise ImportError(f"Failed to import Base from app.db.models: {e}")
 
 target_metadata = Base.metadata
 
@@ -24,7 +23,11 @@ if database_url:
 
 def run_migrations_offline():
     url = config.get_main_option("sqlalchemy.url")
-    context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+    )
 
     with context.begin_transaction():
         context.run_migrations()
@@ -38,7 +41,10 @@ def run_migrations_online():
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+        )
 
         with context.begin_transaction():
             context.run_migrations()
