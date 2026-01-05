@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS trades (
   is_duplicate BOOLEAN NOT NULL DEFAULT false
 );
 
+DROP INDEX IF EXISTS uq_open_trade_key;
+
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_open_trade_on_fields
   ON trades (ticker, direction, entry_date, entry_price)
   WHERE end_date IS NULL;
