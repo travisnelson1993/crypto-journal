@@ -4,22 +4,21 @@
 CREATE TABLE IF NOT EXISTS trades (
   id SERIAL PRIMARY KEY,
   ticker TEXT NOT NULL,
-  direction VARCHAR(16),
+  direction TEXT,
   entry_price DOUBLE PRECISION,
   exit_price DOUBLE PRECISION,
   stop_loss DOUBLE PRECISION,
   leverage INTEGER NOT NULL DEFAULT 1,
-  entry_date TIMESTAMPTZ,
-  end_date TIMESTAMPTZ,
+  entry_date TIMESTAMP,
+  end_date TIMESTAMP,
   entry_summary TEXT,
-  orphan_close BOOLEAN NOT NULL DEFAULT FALSE,
+  orphan_close BOOLEAN NOT NULL DEFAULT false,
   source TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMP DEFAULT now(),
   source_filename TEXT,
-  is_duplicate BOOLEAN NOT NULL DEFAULT FALSE
+  is_duplicate BOOLEAN NOT NULL DEFAULT false
 );
 
--- Unique index for open trades (matches importer + tests)
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_open_trade_on_fields
   ON trades (ticker, direction, entry_date, entry_price)
   WHERE end_date IS NULL;
@@ -28,5 +27,5 @@ CREATE TABLE IF NOT EXISTS imported_files (
   id SERIAL PRIMARY KEY,
   filename TEXT NOT NULL,
   file_hash TEXT NOT NULL UNIQUE,
-  imported_at TIMESTAMPTZ DEFAULT now()
+  imported_at TIMESTAMP DEFAULT now()
 );
