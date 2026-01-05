@@ -1,26 +1,32 @@
-﻿-- Minimal schema required by importer and integration test
+﻿-- Schema synced with final Alembic migrations
+-- This is the baseline DB used by CI before migrations run
 
 CREATE TABLE IF NOT EXISTS trades (
   id SERIAL PRIMARY KEY,
-  ticker TEXT,
-  direction TEXT,
-  entry_date TIMESTAMP,
+  ticker TEXT NOT NULL,
+  direction VARCHAR(16),
   entry_price DOUBLE PRECISION,
-  end_date TIMESTAMP,
+  exit_price DOUBLE PRECISION,
+  stop_loss DOUBLE PRECISION,
+  leverage INTEGER NOT NULL DEFAULT 1,
+  entry_date TIMESTAMPTZ,
+  end_date TIMESTAMPTZ,
+  entry_summary TEXT,
+  orphan_close BOOLEAN NOT NULL DEFAULT FALSE,
   source TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   source_filename TEXT,
-  created_at TIMESTAMP DEFAULT now()
+  is_duplicate BOOLEAN NOT NULL DEFAULT FALSE
 );
 
--- Prevent duplicate open trades with same key (partial unique index)
-CREATE UNIQUE INDEX IF NOT EXISTS uq_open_trade_key
+-- Unique index for open trades (matches importer + tests)
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_open_trade_on_fields
   ON trades (ticker, direction, entry_date, entry_price)
   WHERE end_date IS NULL;
 
--- imported_files table (importer also ensures this table exists, but create here for CI init)
 CREATE TABLE IF NOT EXISTS imported_files (
   id SERIAL PRIMARY KEY,
   filename TEXT NOT NULL,
   file_hash TEXT NOT NULL UNIQUE,
-  imported_at TIMESTAMP DEFAULT now()
+  imported_at TIMESTAMPTZ DEFAULT now()
 );
