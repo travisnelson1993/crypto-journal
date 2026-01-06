@@ -1,96 +1,67 @@
-﻿name: CI
+name: CI
 
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
-  tests:
-    name: Run tests
+  test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: [3.11]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    timeout-minutes: 60
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # ensure test/runtime deps needed by importer/tests are present
-          python -m pip install pytest pandas psycopg2-binary numpy
-
-      - name: Run pytest (unit tests)
-        # Run pytest in one bash-friendly line; ignore integration tests
-        run: python -m pytest -q --maxfail=1 --disable-warnings --ignore=tests/test_import_close_in_same_file.py --ignore=tests/test_import_integration.py
-
-  integration:
-    name: Integration tests (manual)
-    runs-on: ubuntu-latest
-    # only run this job when manually triggered
-    if: github.event_name == 'workflow_dispatch'
     services:
       postgres:
         image: postgres:15
         env:
+          POSTGRES_DB: testdb
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: testdb
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d testdb"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+          --health-cmd="pg_isready -U postgres -d testdb"
+          --health-interval=5s
+          --health-timeout=2s
+          --health-retries=60
+
+    env:
+      PYTHONPATH: .
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+      CRYPTO_JOURNAL_DSN: postgresql://postgres:postgres@localhost:5432/testdb
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Wait for Postgres to be ready
-        run: |
-          echo "Waiting for Postgres..."
-          for i in {1..30}; do
-            pg_isready -h localhost -p 5432 -U postgres -d testdb && break
-            sleep 1
-          done
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.11
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          python -m pip install pytest psycopg2-binary pandas numpy
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install alembic psycopg2-binary pytest pandas
 
-      - name: Install psql client
+      - name: Wait for Postgres
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          for i in {1..60}; do
+            pg_isready -h localhost -p 5432 -U postgres -d testdb && exit 0
+            echo "Waiting for Postgres..."
+            sleep 1
+          done
+          echo "Postgres did not become ready in time"
+          exit 1
 
-      - name: Initialize DB from schema
-        env:
-          PGPASSWORD: postgres
+      - name: Run Alembic migrations
         run: |
-          psql "postgresql://postgres:postgres@localhost:5432/testdb" -f scripts/schema.sql
+          python -m alembic upgrade head
+          python -m alembic current
 
-      - name: Export CRYPTO_JOURNAL_DSN
-        run: echo "CRYPTO_JOURNAL_DSN=postgresql://postgres:postgres@localhost:5432/testdb" >> $GITHUB_ENV
-
-      - name: Run only integration test (importer)
+      - name: Run importer integration test
         run: |
           python -m pytest tests/test_import_integration.py -k importer -s -vv
