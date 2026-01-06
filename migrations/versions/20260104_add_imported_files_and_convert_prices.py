@@ -1,7 +1,7 @@
 ﻿"""add imported_files table and convert price columns to double precision
 
 Revision ID: 20260104_add_imported_files_and_convert_prices
-Revises: 20260103_create_uniq_open_trade_index_after_trades
+Revises: 20251230_add_uniq_open_trade_index
 Create Date: 2026-01-01 00:00:00.000000
 """
 
@@ -9,9 +9,10 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import inspect
 
+
 # revision identifiers, used by Alembic.
 revision = "20260104_add_imported_files_and_convert_prices"
-down_revision = "20260103_create_uniq_open_trade_index_after_trades"
+down_revision = "20251230_add_uniq_open_trade_index"
 branch_labels = None
 depends_on = None
 
