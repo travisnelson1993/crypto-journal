@@ -14,21 +14,21 @@ jobs:
       postgres:
         image: postgres:15
         env:
-          POSTGRES_DB: crypto_journal
+          POSTGRES_DB: testdb
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U postgres -d crypto_journal"
+          --health-cmd="pg_isready -U postgres -d testdb"
           --health-interval=5s
           --health-timeout=2s
           --health-retries=60
 
     env:
       PYTHONPATH: .
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/crypto_journal
-      CRYPTO_JOURNAL_DSN: postgresql://postgres:postgres@localhost:5432/crypto_journal
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+      CRYPTO_JOURNAL_DSN: postgresql://postgres:postgres@localhost:5432/testdb
 
     steps:
       - uses: actions/checkout@v4
@@ -40,24 +40,39 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install alembic psycopg2-binary
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
+          pip install alembic psycopg2-binary pytest pandas
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..60}; do
+            python - <<'PY'
+import os, sys
+import psycopg2
+dsn = os.environ["DATABASE_URL"]
+try:
+    conn = psycopg2.connect(dsn)
+    conn.close()
+    print("Postgres is ready")
+    sys.exit(0)
+except Exception as e:
+    print("Waiting for Postgres...", e)
+    sys.exit(1)
+PY
+            if [ $? -eq 0 ]; then exit 0; fi
+            sleep 1
+          done
+          echo "Postgres did not become ready in time"
+          exit 1
 
       - name: Run Alembic migrations
-        run: >
-          python -c "import os;
-          from alembic.config import Config;
-          from alembic import command;
-          cfg = Config('alembic.ini');
-          db = os.environ.get('DATABASE_URL') or os.environ.get('CRYPTO_JOURNAL_DSN');
-          assert db, 'DATABASE_URL not set';
-          cfg.set_main_option('sqlalchemy.url', db);
-          command.upgrade(cfg, 'head')"
-
-      - name: Run tests
         run: |
-          pip install pytest pandas
-          pytest -q
+          python -m alembic upgrade head
+          python -m alembic current
+
+      - name: Run importer integration test
+        run: |
+          python -m pytest tests/test_import_integration.py -k importer -s -vv
 
