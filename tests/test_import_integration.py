@@ -23,7 +23,10 @@ def file_sha256(path):
 
 
 def get_conn(dsn):
-    return psycopg2.connect(dsn)
+    # IMPORTANT: autocommit avoids "transaction aborted" bleed-over
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    return conn
 
 
 def cleanup_db(conn):
@@ -36,13 +39,12 @@ def cleanup_db(conn):
             "DELETE FROM imported_files WHERE filename LIKE %s",
             ("test-sample-%",),
         )
-    conn.commit()
 
 
 def ensure_unique_open_trade_index(conn):
     """
     The importer requires this index to guarantee idempotency.
-    Ensure it exists in the test DB regardless of migration state.
+    Ensure it exists EXACTLY as expected by the importer.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -52,7 +54,6 @@ def ensure_unique_open_trade_index(conn):
             WHERE end_date IS NULL;
             """
         )
-    conn.commit()
 
 
 def run_importer(file_path, dsn):
@@ -77,7 +78,10 @@ def run_importer(file_path, dsn):
 
 def count_trades(conn):
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM trades WHERE source = %s", (SOURCE_NAME,))
+        cur.execute(
+            "SELECT count(*) FROM trades WHERE source = %s",
+            (SOURCE_NAME,),
+        )
         return cur.fetchone()[0]
 
 
@@ -122,11 +126,13 @@ def test_importer_idempotent_and_records_filename(tmp_path, dsn):
     conn = get_conn(dsn)
     cleanup_db(conn)
     ensure_unique_open_trade_index(conn)
-    conn.close()  # IMPORTANT: close setup connection before importer runs
+    conn.close()  # MUST close before importer opens its own connection
 
     # --- Prepare two input files with identical content but different names ---
     fixture = os.path.join("tests", "fixtures", "sample_order_history.csv")
-    assert os.path.exists(fixture), "Fixture not found: tests/fixtures/sample_order_history.csv"
+    assert os.path.exists(fixture), (
+        "Fixture not found: tests/fixtures/sample_order_history.csv"
+    )
 
     in1 = tmp_path / f"test-sample-{uuid.uuid4().hex[:8]}-a.csv"
     in2 = tmp_path / f"test-sample-{uuid.uuid4().hex[:8]}-b.csv"
