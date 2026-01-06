@@ -2,10 +2,13 @@
 """
 Import Blofin CSV(s) into the trades table.
 
-SAFE MODE:
-- No ON CONFLICT usage (Postgres cannot use partial unique indexes with it)
-- Uses WHERE NOT EXISTS for idempotency
-- Transaction-safe (no aborted transactions)
+CI-SAFE MODE
+-------------
+• NO ON CONFLICT
+• NO savepoints
+• WHERE NOT EXISTS idempotency
+• Transaction-safe
+• Works even if uniq_open_trade_on_fields index is missing
 """
 
 import argparse
@@ -25,7 +28,7 @@ from app.utils.side_parser import infer_action_and_direction
 SOURCE_NAME = "blofin_order_history"
 
 
-# ---------------- helpers ----------------
+# ───────────────────────── helpers ─────────────────────────
 
 def file_sha256(path):
     h = hashlib.sha256()
@@ -70,16 +73,16 @@ def ensure_imported_files_table(cur):
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS imported_files (
-          id SERIAL PRIMARY KEY,
-          filename TEXT NOT NULL,
-          file_hash TEXT NOT NULL UNIQUE,
-          imported_at TIMESTAMP DEFAULT now()
+            id SERIAL PRIMARY KEY,
+            filename TEXT NOT NULL,
+            file_hash TEXT NOT NULL UNIQUE,
+            imported_at TIMESTAMP DEFAULT now()
         );
         """
     )
 
 
-# ---------------- core ----------------
+# ───────────────────────── core ─────────────────────────
 
 def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     print(f"Processing: {file_path}")
@@ -89,9 +92,10 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     cur = conn.cursor()
 
     try:
+        # Ensure imported_files exists
         ensure_imported_files_table(cur)
 
-        # Skip if already imported
+        # Skip already imported file (hash-based)
         cur.execute(
             "SELECT 1 FROM imported_files WHERE file_hash = %s",
             (file_hash,),
@@ -115,23 +119,27 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
 
             side = row.get("Side", "")
             status = row.get("Status", "")
-            avg_fill = parse_price(row.get("Avg Fill"))
+            leverage = int(row.get("Leverage") or 1)
+            price = parse_price(row.get("Avg Fill"))
             entry_date = parse_datetime(row.get("Order Time"), tz)
 
             action, direction, _ = infer_action_and_direction(side)
             is_open = action == "OPEN"
-
             entry_summary = make_entry_summary(side, status)
 
+            created_at = datetime.utcnow()
+
             if is_open:
-                # ---- SAFE INSERT (NO ON CONFLICT) ----
+                # ── SAFE OPEN INSERT ──
                 cur.execute(
                     """
                     INSERT INTO trades
-                    (ticker, direction, entry_price, leverage,
-                     entry_date, entry_summary, orphan_close,
-                     source, created_at, source_filename, is_duplicate)
-                    SELECT %s,%s,%s,%s,%s,%s,false,%s,%s,%s,false
+                    (ticker, direction, entry_price, exit_price, stop_loss,
+                     leverage, entry_date, end_date, entry_summary,
+                     orphan_close, source, created_at, source_filename, is_duplicate)
+                    SELECT %s,%s,%s,NULL,NULL,
+                           %s,%s,NULL,%s,
+                           false,%s,%s,%s,false
                     WHERE NOT EXISTS (
                         SELECT 1 FROM trades
                         WHERE ticker=%s
@@ -144,42 +152,43 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                     (
                         ticker,
                         direction,
-                        avg_fill,
-                        int(row.get("Leverage") or 1),
+                        price,
+                        leverage,
                         entry_date,
                         entry_summary,
                         SOURCE_NAME,
-                        datetime.utcnow(),
+                        created_at,
                         basename,
                         ticker,
                         direction,
-                        avg_fill,
+                        price,
                         entry_date,
                     ),
                 )
 
             else:
-                # ---- CLOSE ROW (ALWAYS INSERT) ----
+                # ── CLOSE ROW (ALWAYS INSERT) ──
                 cur.execute(
                     """
                     INSERT INTO trades
-                    (ticker, direction, entry_price, exit_price,
-                     leverage, entry_date, end_date,
-                     entry_summary, orphan_close,
-                     source, created_at, source_filename, is_duplicate)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,false,%s,%s,%s,false)
+                    (ticker, direction, entry_price, exit_price, stop_loss,
+                     leverage, entry_date, end_date, entry_summary,
+                     orphan_close, source, created_at, source_filename, is_duplicate)
+                    VALUES (%s,%s,%s,%s,NULL,
+                            %s,%s,%s,%s,
+                            false,%s,%s,%s,false)
                     """,
                     (
                         ticker,
                         direction,
-                        avg_fill,
-                        avg_fill,
-                        int(row.get("Leverage") or 1),
+                        price,
+                        price,
+                        leverage,
                         entry_date,
                         entry_date,
                         entry_summary,
                         SOURCE_NAME,
-                        datetime.utcnow(),
+                        created_at,
                         basename,
                     ),
                 )
