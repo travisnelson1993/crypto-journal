@@ -51,7 +51,9 @@ jobs:
             python - <<'PY'
 import os, sys
 import psycopg2
+
 dsn = os.environ["DATABASE_URL"]
+
 try:
     conn = psycopg2.connect(dsn)
     conn.close()
@@ -75,4 +77,3 @@ PY
       - name: Run importer integration test
         run: |
           python -m pytest tests/test_import_integration.py -k importer -s -vv
-
