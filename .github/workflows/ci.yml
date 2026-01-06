@@ -31,9 +31,11 @@ jobs:
       CRYPTO_JOURNAL_DSN: postgresql://postgres:postgres@localhost:5432/testdb
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -48,22 +50,8 @@ jobs:
       - name: Wait for Postgres
         run: |
           for i in {1..60}; do
-            python - <<'PY'
-import os, sys
-import psycopg2
-
-dsn = os.environ["DATABASE_URL"]
-
-try:
-    conn = psycopg2.connect(dsn)
-    conn.close()
-    print("Postgres is ready")
-    sys.exit(0)
-except Exception as e:
-    print("Waiting for Postgres...", e)
-    sys.exit(1)
-PY
-            if [ $? -eq 0 ]; then exit 0; fi
+            pg_isready -h localhost -p 5432 -U postgres -d testdb && exit 0
+            echo "Waiting for Postgres..."
             sleep 1
           done
           echo "Postgres did not become ready in time"
