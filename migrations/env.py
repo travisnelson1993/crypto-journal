@@ -2,28 +2,44 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
+# Alembic Config object
 config = context.config
-fileConfig(config.config_file_name)
 
-# Import ONLY metadata (safe)
+# Logging config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+# Import metadata ONLY (safe)
 from app.db.database import Base
-
 target_metadata = Base.metadata
 
-# Prefer DATABASE_URL if set
-database_url = os.getenv("DATABASE_URL")
-if database_url:
-    config.set_main_option("sqlalchemy.url", database_url)
+
+def get_database_url() -> str:
+    """
+    Resolve the database URL in a single, deterministic way.
+
+    Priority:
+    1. DATABASE_URL (GitHub Actions / CI)
+    2. CRYPTO_JOURNAL_DSN (local dev / importer)
+    """
+    return (
+        os.getenv("DATABASE_URL")
+        or os.getenv("CRYPTO_JOURNAL_DSN")
+    )
 
 
 def run_migrations_offline():
-    url = config.get_main_option("sqlalchemy.url")
+    url = get_database_url()
+    if not url:
+        raise RuntimeError("DATABASE_URL or CRYPTO_JOURNAL_DSN must be set")
+
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
+        compare_type=True,
     )
 
     with context.begin_transaction():
@@ -31,16 +47,17 @@ def run_migrations_offline():
 
 
 def run_migrations_online():
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    url = get_database_url()
+    if not url:
+        raise RuntimeError("DATABASE_URL or CRYPTO_JOURNAL_DSN must be set")
 
-    with connectable.connect() as connection:
+    engine = create_engine(url, poolclass=pool.NullPool)
+
+    with engine.connect() as connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
+            compare_type=True,
         )
 
         with context.begin_transaction():
