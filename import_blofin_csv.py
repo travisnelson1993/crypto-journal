@@ -1,14 +1,21 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Import Blofin CSV(s) into the trades table.
 
-CI-SAFE MODE
--------------
+CI-SAFE / TRANSACTION-SAFE
+--------------------------
 - NO ON CONFLICT
-- Uses SAVEPOINT per-row so one bad row cannot poison the whole transaction
-- WHERE NOT EXISTS idempotency for OPEN rows
-- Always inserts CLOSE rows (so CSV row count == trade row count)
-- Works even if uniq_open_trade_on_fields index is missing
+- NO SAVEPOINTS
+- Each CSV row is executed in its own transaction (commit/rollback per row)
+  so a single bad row cannot poison the whole import.
+- Uses WHERE NOT EXISTS for open-trade idempotency (works even if the
+  uniq_open_trade_on_fields index is missing).
+- Close rows are always inserted (so total rows == CSV rows).
+- Records imported_files by SHA-256 (skips exact file re-imports).
+
+Usage examples:
+  python import_blofin_csv.py --input "/path/to/Order_history_*.csv" --db "$CRYPTO_JOURNAL_DSN"
+  python import_blofin_csv.py --input "/path/to/csv_dir" --archive-dir "/path/to/archive" --tz "America/Los_Angeles" --db "$CRYPTO_JOURNAL_DSN"
 """
 
 import argparse
@@ -28,8 +35,7 @@ from app.utils.side_parser import infer_action_and_direction
 SOURCE_NAME = "blofin_order_history"
 
 
-# ───────────────────────── helpers ─────────────────────────
-
+# ---------------- helpers ----------------
 
 def file_sha256(path: str) -> str:
     h = hashlib.sha256()
@@ -40,27 +46,20 @@ def file_sha256(path: str) -> str:
 
 
 def parse_price(s):
-    """
-    Parses numbers that may include extra text. Returns float or None.
-    """
     if s is None:
         return None
     if not isinstance(s, str):
-        # pandas can hand us NaN floats or other types
         try:
-            if pd.isna(s):
-                return None
+            return float(s)
         except Exception:
-            pass
-        return None
+            return None
 
     s = s.strip()
     if s in ("", "--", "Market"):
         return None
 
-    # tolerate things like "123.45 USDT" or "1.23e-4"
+    # Accept values like "123.45", "123.45 USDT", "1e-6", etc.
     import re
-
     m = re.match(r"([0-9\.\-eE]+)", s)
     if not m:
         return None
@@ -71,119 +70,168 @@ def parse_price(s):
 
 
 def parse_datetime(s, tz=None):
-    """
-    Returns naive UTC datetime if tz provided, else returns naive parsed datetime.
-    """
-    dt = pd.to_datetime(s, errors="coerce")
-    if pd.isna(dt):
+    try:
+        dt = pd.to_datetime(s, format="%m/%d/%Y %H:%M:%S", errors="coerce")
+        if pd.isna(dt):
+            dt = pd.to_datetime(s, errors="coerce")
+        if pd.isna(dt):
+            return None
+
+        ts = dt.to_pydatetime()
+        if tz:
+            local = ts.replace(tzinfo=ZoneInfo(tz))
+            return local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+        return ts
+    except Exception:
         return None
-    ts = dt.to_pydatetime()
-    if tz:
-        ts = ts.replace(tzinfo=ZoneInfo(tz)).astimezone(ZoneInfo("UTC"))
-        return ts.replace(tzinfo=None)
-    return ts
 
 
 def make_entry_summary(side, status):
-    side = (side or "").strip()
-    status = (status or "").strip()
-    if side.lower().startswith("open"):
+    side = side or ""
+    status = status or ""
+    side_norm = side.lower()
+
+    if side_norm.startswith("open"):
         return f"Imported: {side}"
+
+    # Keep your original intent here
+    if status.lower().startswith("filled"):
+        return f"Imported orphan close: {side}"
+
     return f"Imported close: {side}"
 
 
-def safe_int(val, default=1) -> int:
-    if val is None:
-        return default
-    if isinstance(val, (int,)):
-        return int(val)
-    if isinstance(val, float):
-        try:
-            if pd.isna(val):
-                return default
-        except Exception:
-            pass
-        return int(val)
-    s = str(val).strip()
-    if s == "" or s.lower() in ("nan", "none"):
-        return default
-    try:
-        return int(float(s))
-    except Exception:
-        return default
+def ensure_imported_files_table(conn):
+    # DDL should be outside a long-running transaction; use autocommit.
+    # In CI this prevents "current transaction is aborted" cascades.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS imported_files (
+              id SERIAL PRIMARY KEY,
+              filename TEXT NOT NULL,
+              file_hash TEXT NOT NULL UNIQUE,
+              imported_at TIMESTAMP DEFAULT now()
+            );
+            """
+        )
 
 
-def ensure_imported_files_table(cur):
+def find_open_trade_and_update(cur, ticker, direction, close_price, close_dt, entry_price=None, price_tolerance=0.0001):
+    """
+    Best-effort: update an existing open trade (exit_price IS NULL) with close data.
+    Does NOT overwrite source_filename/created_at.
+    Returns True if an update occurred, False otherwise.
+    """
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS imported_files (
-            id SERIAL PRIMARY KEY,
-            filename TEXT NOT NULL,
-            file_hash TEXT NOT NULL UNIQUE,
-            imported_at TIMESTAMP DEFAULT now()
-        );
-        """
+        SELECT id, entry_price, entry_date
+        FROM trades
+        WHERE ticker = %s
+          AND direction = %s
+          AND exit_price IS NULL
+          AND entry_date <= %s
+        ORDER BY entry_date DESC, created_at DESC
+        LIMIT 1
+        """,
+        (ticker, direction, close_dt),
     )
+    row = cur.fetchone()
+    if not row:
+        return False
+
+    trade_id, existing_entry_price, _existing_entry_date = row
+
+    # Optional price check (non-blocking)
+    if entry_price is not None:
+        try:
+            if abs(float(existing_entry_price) - float(entry_price)) > price_tolerance:
+                pass
+        except Exception:
+            pass
+
+    cur.execute(
+        """
+        UPDATE trades
+        SET exit_price = %s,
+            end_date = %s,
+            entry_summary = COALESCE(entry_summary, %s),
+            orphan_close = %s,
+            is_duplicate = %s
+        WHERE id = %s
+        """,
+        (close_price, close_dt, f"Imported: Close @ {close_price}", False, False, trade_id),
+    )
+    return cur.rowcount > 0
 
 
-def create_savepoint_name(prefix: str, i: int) -> str:
-    # Keep it simple/safe for SQL identifiers.
-    return f"{prefix}_{i}"
-
-
-# ───────────────────────── core ─────────────────────────
-
+# ---------------- core ----------------
 
 def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
     print(f"Processing: {file_path}")
     basename = os.path.basename(file_path)
     file_hash = file_sha256(file_path)
 
-    cur = conn.cursor()
-
+    # Ensure imported_files exists (DDL)
+    # Use a separate short autocommit block so it can't poison the main flow
+    prev_autocommit = conn.autocommit
     try:
-        # Ensure imported_files exists
-        ensure_imported_files_table(cur)
+        conn.autocommit = True
+        ensure_imported_files_table(conn)
+    finally:
+        conn.autocommit = prev_autocommit
 
-        # Skip already imported file (hash-based)
-        cur.execute(
-            "SELECT 1 FROM imported_files WHERE file_hash = %s",
-            (file_hash,),
-        )
+    # Skip if already imported (hash match)
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM imported_files WHERE file_hash = %s", (file_hash,))
         if cur.fetchone():
             print("  -> already imported (hash match). Skipping.")
             return
 
-        df = pd.read_csv(file_path, dtype=str)
-        df.columns = [c.strip() for c in df.columns]
+    df = pd.read_csv(file_path, dtype=str)
+    df.columns = [c.strip() for c in df.columns]
 
-        for i, row in enumerate(df.to_dict(orient="records")):
-            ticker = (
-                row.get("Underlying Asset")
-                or row.get("Ticker")
-                or row.get("symbol")
-                or row.get("Instrument")
-            )
-            ticker = ticker.strip() if isinstance(ticker, str) else ticker
-            if not ticker:
-                continue
+    # Track how many rows we actually inserted (helpful for CI logs)
+    inserted_rows = 0
+    failed_rows = 0
 
-            side = row.get("Side", "") or ""
-            status = row.get("Status", "") or ""
-            leverage = safe_int(row.get("Leverage"), default=1)
-            price = parse_price(row.get("Avg Fill"))
-            entry_date = parse_datetime(row.get("Order Time"), tz)
+    for i, row in df.iterrows():
+        # Build the record
+        ticker = (
+            (row.get("Underlying Asset") or "")
+            or (row.get("Ticker") or "")
+            or (row.get("symbol") or "")
+            or (row.get("Instrument") or "")
+        )
+        ticker = ticker.strip() if isinstance(ticker, str) else ticker
 
-            action, direction, _ = infer_action_and_direction(side)
-            is_open = action == "OPEN"
-            entry_summary = make_entry_summary(side, status)
-            created_at = datetime.utcnow()
+        if not ticker:
+            continue
 
-            if is_open:
-                # ── SAFE OPEN INSERT (SAVEPOINT protected) ──
-                sp = create_savepoint_name("sp_open", i)
-                cur.execute(f"SAVEPOINT {sp}")
-                try:
+        leverage_raw = row.get("Leverage")
+        try:
+            leverage_val = int(str(leverage_raw).strip()) if leverage_raw is not None and str(leverage_raw).strip() != "" else 1
+        except Exception:
+            leverage_val = 1
+
+        order_time = row.get("Order Time")
+        entry_date = parse_datetime(order_time, tz=tz)
+
+        side = row.get("Side", "")
+        avg_fill = parse_price(row.get("Avg Fill", ""))
+        status = row.get("Status", "")
+
+        action, direction, _reason = infer_action_and_direction(side)
+        open_flag = action == "OPEN"
+        entry_summary = make_entry_summary(side, status)
+        created_at = datetime.utcnow()
+
+        # IMPORTANT: transaction safety
+        # Each row executes in its own transaction.
+        try:
+            with conn.cursor() as cur:
+                if open_flag:
+                    # Idempotent insert for open trades (no ON CONFLICT)
                     cur.execute(
                         """
                         INSERT INTO trades
@@ -205,8 +253,8 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                         (
                             ticker,
                             direction,
-                            price,
-                            leverage,
+                            avg_fill,
+                            leverage_val,
                             entry_date,
                             entry_summary,
                             SOURCE_NAME,
@@ -214,22 +262,25 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                             basename,
                             ticker,
                             direction,
-                            price,
+                            avg_fill,
                             entry_date,
                         ),
                     )
-                    cur.execute(f"RELEASE SAVEPOINT {sp}")
-                except Exception:
-                    # Do not poison transaction: rollback only this row
-                    cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-                    # (optional) keep going
-                    # cur.execute(f"RELEASE SAVEPOINT {sp}")  # not strictly necessary after rollback in PG
+                else:
+                    # Best-effort: update an open trade, but do not fail the row if update fails
+                    try:
+                        _ = find_open_trade_and_update(
+                            cur,
+                            ticker,
+                            direction,
+                            avg_fill,
+                            entry_date,
+                            entry_price=avg_fill,
+                        )
+                    except Exception:
+                        pass
 
-            else:
-                # ── CLOSE ROW (ALWAYS INSERT) (SAVEPOINT protected) ──
-                sp = create_savepoint_name("sp_close", i)
-                cur.execute(f"SAVEPOINT {sp}")
-                try:
+                    # Always insert close row (so rows == CSV rows)
                     cur.execute(
                         """
                         INSERT INTO trades
@@ -243,9 +294,9 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                         (
                             ticker,
                             direction,
-                            price,
-                            price,
-                            leverage,
+                            avg_fill,
+                            avg_fill,
+                            leverage_val,
                             entry_date,
                             entry_date,
                             entry_summary,
@@ -254,83 +305,92 @@ def process_file(conn, file_path, tz=None, archive_dir=None, dry_run=False):
                             basename,
                         ),
                     )
-                    cur.execute(f"RELEASE SAVEPOINT {sp}")
-                except Exception:
-                    cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-                    # keep going
 
-        # Record imported file (SAVEPOINT protected too, just in case)
-        cur.execute("SAVEPOINT sp_file_record")
-        try:
-            cur.execute(
-                "INSERT INTO imported_files (filename, file_hash) VALUES (%s,%s)",
-                (basename, file_hash),
-            )
-            cur.execute("RELEASE SAVEPOINT sp_file_record")
-        except Exception:
-            cur.execute("ROLLBACK TO SAVEPOINT sp_file_record")
-            # If we can't record the file, we should fail; otherwise we’ll re-import forever.
-            raise
+            if dry_run:
+                conn.rollback()
+            else:
+                conn.commit()
 
-        if dry_run:
+            inserted_rows += 1
+
+        except Exception as e:
+            failed_rows += 1
             conn.rollback()
-            print("  -> dry-run: rolled back")
-        else:
-            conn.commit()
-            print("  -> file import committed")
+            print(f"  -> row {i} failed, continuing (rolled back row txn): {e}")
+            # Uncomment next line if you want full stack traces per row in CI logs:
+            # print(traceback.format_exc())
+            continue
 
-        if archive_dir and not dry_run:
-            os.makedirs(archive_dir, exist_ok=True)
-            shutil.move(file_path, os.path.join(archive_dir, basename))
+    # Record the file as imported ONLY if we are not dry-run
+    # (and do it in its own clean transaction)
+    try:
+        if dry_run:
+            print("  -> dry-run: file hash NOT recorded; no archiving performed")
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO imported_files (filename, file_hash) VALUES (%s, %s)",
+                    (basename, file_hash),
+                )
+            conn.commit()
+            print(f"  -> file import committed ({inserted_rows} rows inserted, {failed_rows} row failures)")
+
+            if archive_dir:
+                os.makedirs(archive_dir, exist_ok=True)
+                dest = os.path.join(archive_dir, basename)
+                shutil.move(file_path, dest)
+                print(f"  -> moved file to archive: {dest}")
 
     except Exception as e:
         conn.rollback()
-        print("\n  -> ERROR during import, transaction rolled back:")
-        print(e)
+        print("\n  -> ERROR recording imported file hash / archiving (rolled back):")
+        print("Exception:", str(e))
         print(traceback.format_exc())
         raise
-
-    finally:
-        try:
-            cur.close()
-        except Exception:
-            pass
 
 
 def gather_input_paths(input_arg):
     if os.path.isdir(input_arg):
-        return sorted(glob.glob(os.path.join(input_arg, "*.csv")))
-    return [p for p in sorted(glob.glob(input_arg)) if os.path.isfile(p)]
+        pattern = os.path.join(input_arg, "*.csv")
+        return sorted(glob.glob(pattern))
+    paths = sorted(glob.glob(input_arg))
+    return [p for p in paths if os.path.isfile(p)]
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--input", "-i", required=True)
-    p.add_argument("--db", "-d", default=None)
-    p.add_argument("--archive-dir", "-a", default=None)
-    p.add_argument("--tz", "-t", default=None)
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--input", "-i", required=True, help="File path, glob, or directory containing CSV(s)")
+    p.add_argument("--db", "-d", required=False, default=None, help="psycopg2 DSN (overrides CRYPTO_JOURNAL_DSN env var)")
+    p.add_argument("--archive-dir", "-a", required=False, default=None, help="Move processed files here")
+    p.add_argument("--tz", "-t", required=False, default=None, help="Timezone of CSV timestamps (e.g. America/Los_Angeles). If set, times will be converted to UTC.")
+    p.add_argument("--dry-run", action="store_true", help="Simulate the import without making any changes to the database")
     args = p.parse_args()
 
     dsn = args.db or os.getenv("CRYPTO_JOURNAL_DSN")
     if not dsn:
-        raise SystemExit("CRYPTO_JOURNAL_DSN not set (or pass --db)")
+        raise SystemExit("DB connection string required: use --db or set CRYPTO_JOURNAL_DSN env var")
 
     paths = gather_input_paths(args.input)
     if not paths:
-        print("No CSV files found.")
+        print("No CSV files found for input:", args.input)
         return
 
     conn = psycopg2.connect(dsn)
     try:
+        # Warning is informational only; importer works without this index now.
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT indexname FROM pg_indexes WHERE indexname = 'uniq_open_trade_on_fields';")
+                if not cur.fetchone():
+                    print("\nWARNING: 'uniq_open_trade_on_fields' index is missing! This can cause duplicates for open trades.")
+                    print("Run create_unique_index.py or apply migrations to add this index for consistency.\n")
+        except Exception:
+            # Don't fail just because pg_indexes isn't readable for some reason
+            pass
+
         for path in paths:
-            process_file(
-                conn,
-                path,
-                tz=args.tz,
-                archive_dir=args.archive_dir,
-                dry_run=args.dry_run,
-            )
+            process_file(conn, path, tz=args.tz, archive_dir=args.archive_dir, dry_run=args.dry_run)
+
     finally:
         conn.close()
 
