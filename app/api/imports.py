@@ -6,232 +6,161 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
-from app.db.database import AsyncSessionLocal
+from app.db.database import SessionLocal
 from app.models.trade import Trade
 
-# Define router with a safe, unique endpoint prefix
+# Router
 router = APIRouter(prefix="/api/import", tags=["imports"])
 
 
-async def get_session() -> AsyncSession:
-    async with AsyncSessionLocal() as session:
-        yield session
+# ---------------- DB dependency (SYNC) ----------------
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# ---------------- helpers ----------------
 
 _qty_re = re.compile(r"([+-]?[0-9,]*\.?[0-9]+)")
 
 
 def parse_money(value: Optional[str]) -> Optional[float]:
-    if value is None:
+    if not value:
         return None
-    v = value.strip()
+    v = value.strip().replace(",", "").replace("%", "")
     if v in ("", "--", "-"):
         return None
-    v = v.replace("%", "").strip()
-    v = re.sub(r"[A-Za-z]+$", "", v).strip()
-    v = v.replace(",", "")
     if v.startswith("(") and v.endswith(")"):
         v = "-" + v[1:-1]
     try:
         return float(v)
     except Exception:
         m = _qty_re.search(v)
-        if m:
-            try:
-                return float(m.group(1))
-            except Exception:
-                return None
+        return float(m.group(1)) if m else None
+
+
+def parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
         return None
-
-
-def parse_qty_unit(filled: Optional[str]):
-    if not filled:
-        return None, None
-    s = filled.strip()
-    parts = s.split()
-    if len(parts) >= 2:
+    for fmt in ("%m/%d/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y"):
         try:
-            qty = float(parts[0].replace(",", ""))
-            unit = parts[1]
-            return qty, unit
+            return datetime.strptime(value.strip(), fmt)
         except Exception:
-            m = _qty_re.search(s)
-            if m:
-                try:
-                    return float(m.group(1)), (parts[-1] if len(parts) > 1 else None)
-                except Exception:
-                    return None, None
-    else:
-        m = _qty_re.search(s)
-        if m:
-            try:
-                return float(m.group(1)), None
-            except Exception:
-                return None, None
-    return None, None
+            pass
+    return None
 
 
-def parse_datetime(s: Optional[str]) -> Optional[datetime]:
-    if not s:
-        return None
-    s = s.strip()
-    fmts = ["%m/%d/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y"]
-    for f in fmts:
-        try:
-            return datetime.strptime(s, f)
-        except Exception:
-            continue
-    try:
-        from dateutil.parser import parse as dateutil_parse
-
-        return dateutil_parse(s)
-    except Exception:
-        return None
-
-
-def heuristic_from_side(side_raw: Optional[str]):
-    """Detect action/direction heuristically via side_raw value."""
-    if not side_raw:
+def heuristic_from_side(side: Optional[str]):
+    if not side:
         return None, None, None
-    s = str(side_raw).strip()
-    lower = s.lower()
-    action = None
-    direction = None
-    reason = None
-
-    if "open" in lower:
-        action = "OPEN"
-    elif "close" in lower:
-        action = "CLOSE"
-
-    if "short" in lower:
-        direction = "SHORT"
-    elif "long" in lower:
-        direction = "LONG"
-
-    if "tp" in lower or "take profit" in lower:
-        reason = "TP"
-    elif "sl" in lower or "stop" in lower:
-        reason = "SL"
-
+    s = side.lower()
+    action = "OPEN" if "open" in s else "CLOSE" if "close" in s else None
+    direction = "LONG" if "long" in s else "SHORT" if "short" in s else None
+    reason = "TP" if "tp" in s else "SL" if "sl" in s else None
     return action, direction, reason
 
 
+# ---------------- endpoint ----------------
+
 @router.post("/csv", status_code=status.HTTP_200_OK)
-async def import_csv(
+def import_csv(
     file: UploadFile = File(...),
-    mode: str = Query("append", regex="^(append|replace)$"),
-    session: AsyncSession = Depends(get_session),
+    mode: str = Query("append", pattern="^(append|replace)$"),
+    db: Session = Depends(get_db),
 ):
-    """Import a CSV file containing trades."""
     if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+        raise HTTPException(400, "Please upload a CSV file")
 
-    contents = await file.read()
+    contents = file.file.read()
     if not contents:
-        raise HTTPException(status_code=400, detail="Empty CSV")
+        raise HTTPException(400, "Empty CSV")
 
-    text = contents.decode(errors="replace")
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.DictReader(io.StringIO(contents.decode(errors="replace")))
 
     if mode == "replace":
-        await session.execute(delete(Trade))
-        await session.commit()
+        db.execute(delete(Trade))
+        db.commit()
 
-    normalized_rows: List[Dict[str, Any]] = []
-    skipped_rows = 0
+    created = closed = orphan = skipped = 0
     skipped_examples: List[Dict[str, Any]] = []
-    created_trades = 0
-    closed_trades = 0
-    orphan_closes_created = 0
-    _merged_orphans = 0
 
-    # Normalize rows
     for raw in reader:
-        side_raw = raw.get("Side") or raw.get("side") or ""
-        action, direction, close_reason = heuristic_from_side(side_raw)
+        action, direction, _ = heuristic_from_side(raw.get("Side"))
         symbol = (
-            raw.get("Underlying Asset") or raw.get("Ticker") or raw.get("symbol") or ""
+            raw.get("Underlying Asset")
+            or raw.get("Ticker")
+            or raw.get("symbol")
+            or ""
         ).strip()
-        order_time = parse_datetime(raw.get("Order Time") or raw.get("Order Date"))
-        avg_fill = parse_money(raw.get("Avg Fill"))
-        filled_qty, filled_unit = parse_qty_unit(raw.get("Filled"))
 
         if not action or not direction or not symbol:
-            skipped_rows += 1
+            skipped += 1
             if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": "missing_data", "row": raw})
+                skipped_examples.append(raw)
             continue
 
-        normalized_rows.append(
-            {
-                "raw": raw,
-                "symbol": symbol,
-                "order_time": order_time,
-                "action": action,
-                "direction": direction,
-                "close_reason": close_reason,
-                "avg_fill": avg_fill,
-                "filled_qty": filled_qty,
-            }
-        )
-
-    # Execute trades
-    for nr in normalized_rows:
-        action = nr["action"]
-        direction = nr["direction"]
-        symbol = nr["symbol"]
-        entry_date = nr["order_time"]
-        avg_fill = nr["avg_fill"]
-        close_reason = nr["close_reason"]
+        entry_date = parse_datetime(raw.get("Order Time"))
+        price = parse_money(raw.get("Avg Fill"))
 
         if action == "OPEN":
-            trade = Trade(
-                ticker=symbol,
-                direction=direction,
-                entry_price=avg_fill,
-                leverage=None,  # Set default leverage or map if available
-                entry_date=entry_date or datetime.utcnow(),
-                source="blofin_order_history",
-            )
-            session.add(trade)
-            created_trades += 1
-        elif action == "CLOSE":
-            query = select(Trade).where(
-                Trade.ticker == symbol,
-                Trade.direction == direction,
-                Trade.end_date.is_(None),
-            )
-            result = await session.execute(query)
-            open_trade = result.scalars().first()
-            if open_trade:
-                open_trade.exit_price = avg_fill
-                open_trade.end_date = entry_date
-                closed_trades += 1
-                session.add(open_trade)
-            else:
-                orphan_close = Trade(
+            db.add(
+                Trade(
                     ticker=symbol,
                     direction=direction,
-                    entry_price=avg_fill,
-                    exit_price=avg_fill,
-                    end_date=entry_date or datetime.utcnow(),
+                    entry_price=price,
                     entry_date=entry_date or datetime.utcnow(),
-                    orphan_close=True,
                     source="blofin_order_history",
                 )
-                session.add(orphan_close)
-                orphan_closes_created += 1
+            )
+            created += 1
 
-    await session.commit()
+        else:  # CLOSE
+            open_trade = (
+                db.execute(
+                    select(Trade)
+                    .where(
+                        Trade.ticker == symbol,
+                        Trade.direction == direction,
+                        Trade.end_date.is_(None),
+                    )
+                    .order_by(Trade.entry_date.desc())
+                )
+                .scalars()
+                .first()
+            )
+
+            if open_trade:
+                open_trade.exit_price = price
+                open_trade.end_date = entry_date or datetime.utcnow()
+                closed += 1
+            else:
+                db.add(
+                    Trade(
+                        ticker=symbol,
+                        direction=direction,
+                        entry_price=price,
+                        exit_price=price,
+                        entry_date=entry_date or datetime.utcnow(),
+                        end_date=entry_date or datetime.utcnow(),
+                        orphan_close=True,
+                        source="blofin_order_history",
+                    )
+                )
+                orphan += 1
+
+    db.commit()
+
     return {
         "ok": True,
-        "source": "blofin_order_history",
-        "created_trades": created_trades,
-        "closed_trades": closed_trades,
-        "orphan_closes_created": orphan_closes_created,
-        "skipped_rows": skipped_rows,
+        "created_trades": created,
+        "closed_trades": closed,
+        "orphan_closes_created": orphan,
+        "skipped_rows": skipped,
         "skipped_examples": skipped_examples,
     }
