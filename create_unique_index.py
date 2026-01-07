@@ -19,9 +19,10 @@ Notes:
   - Example DSN (PowerShell):
     $env:CRYPTO_JOURNAL_DSN = "dbname=crypto_journal user=postgres password=YOURPASS host=127.0.0.1 port=5432"
 """
+import argparse
 import os
 import sys
-import argparse
+
 import psycopg2
 
 INDEX_NAME = "uniq_open_trade_on_fields"
@@ -63,14 +64,20 @@ LIMIT 200;
 
 BACKUP_SQL = "CREATE TABLE IF NOT EXISTS trades_backup AS TABLE trades WITH DATA;"
 
+
 def get_dsn():
     dsn = os.getenv("CRYPTO_JOURNAL_DSN")
     if not dsn:
-        print("CRYPTO_JOURNAL_DSN environment variable is not set. Please set it and re-run.")
-        print('Example (PowerShell):')
-        print('$env:CRYPTO_JOURNAL_DSN = "dbname=crypto_journal user=postgres password=YOURPASS host=127.0.0.1 port=5432"')
+        print(
+            "CRYPTO_JOURNAL_DSN environment variable is not set. Please set it and re-run."
+        )
+        print("Example (PowerShell):")
+        print(
+            '$env:CRYPTO_JOURNAL_DSN = "dbname=crypto_journal user=postgres password=YOURPASS host=127.0.0.1 port=5432"'
+        )
         sys.exit(1)
     return dsn
+
 
 def check_duplicates(conn):
     with conn.cursor() as cur:
@@ -78,11 +85,13 @@ def check_duplicates(conn):
         rows = cur.fetchall()
         return rows
 
+
 def show_duplicate_details(conn):
     with conn.cursor() as cur:
         cur.execute(DUP_DETAILS_SQL)
         rows = cur.fetchall()
         return rows
+
 
 def create_backup(conn):
     with conn.cursor() as cur:
@@ -90,6 +99,7 @@ def create_backup(conn):
         cur.execute(BACKUP_SQL)
     conn.commit()
     print("Backup created (trades_backup).")
+
 
 def create_index(conn, concurrent=True):
     # CREATE INDEX CONCURRENTLY must be run with autocommit = True
@@ -107,10 +117,19 @@ def create_index(conn, concurrent=True):
         conn.commit()
     print("Index created (or already existed).")
 
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--backup", action="store_true", help="Create trades_backup before making changes")
-    p.add_argument("--no-concurrent", action="store_true", help="Create index without CONCURRENTLY (may take locks)")
+    p.add_argument(
+        "--backup",
+        action="store_true",
+        help="Create trades_backup before making changes",
+    )
+    p.add_argument(
+        "--no-concurrent",
+        action="store_true",
+        help="Create index without CONCURRENTLY (may take locks)",
+    )
     args = p.parse_args()
 
     dsn = get_dsn()
@@ -123,20 +142,31 @@ def main():
     try:
         dup = check_duplicates(conn)
         if dup:
-            print("Found duplicate open-trade keys that will prevent creating the unique index.")
-            print("Sample duplicates (ticker, direction, entry_date, entry_price, count):")
+            print(
+                "Found duplicate open-trade keys that will prevent creating the unique index."
+            )
+            print(
+                "Sample duplicates (ticker, direction, entry_date, entry_price, count):"
+            )
             for r in dup:
                 print(r)
-            print("\nDetailed rows (id, ticker, direction, entry_date, entry_price, end_date):")
+            print(
+                "\nDetailed rows (id, ticker, direction, entry_date, entry_price, end_date):"
+            )
             details = show_duplicate_details(conn)
             for d in details:
                 print(d)
             print("\nYou must deduplicate these rows before creating the unique index.")
             print("Recommended steps:")
             print(" 1) Create a backup (you can use --backup with this script).")
-            print(" 2) Inspect and dedupe manually or use a SQL delete that keeps one row per key.")
-            print("\nExample SQL to keep the lowest id for each duplicate key (RUN ONLY AFTER BACKUP):")
-            print('''
+            print(
+                " 2) Inspect and dedupe manually or use a SQL delete that keeps one row per key."
+            )
+            print(
+                "\nExample SQL to keep the lowest id for each duplicate key (RUN ONLY AFTER BACKUP):"
+            )
+            print(
+                """
 WITH to_keep AS (
   SELECT min(id) AS keep_id
   FROM trades
@@ -158,7 +188,8 @@ WHERE id IN (
       HAVING count(*) > 1
     )
 );
-''')
+"""
+            )
             sys.exit(2)
 
         # No duplicates found
@@ -169,6 +200,7 @@ WHERE id IN (
 
     finally:
         conn.close()
+
 
 if __name__ == "__main__":
     main()

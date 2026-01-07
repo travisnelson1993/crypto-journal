@@ -1,62 +1,101 @@
 ﻿"""add imported_files table and convert price columns to double precision
 
 Revision ID: 20260104_add_imported_files_and_convert_prices
-Revises: 20260103_create_uniq_open_trade_index_after_trades
+Revises: 20251230_add_uniq_open_trade_index
 Create Date: 2026-01-01 00:00:00.000000
 """
-from alembic import op
+
 import sqlalchemy as sa
+from alembic import op
+from sqlalchemy import inspect
+
 
 # revision identifiers, used by Alembic.
 revision = "20260104_add_imported_files_and_convert_prices"
-down_revision = "20260103_create_uniq_open_trade_index_after_trades"
+down_revision = "20251230_add_uniq_open_trade_index"
 branch_labels = None
 depends_on = None
 
 
-def upgrade():
-    # Create imported_files table
-    op.create_table(
-        "imported_files",
-        sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-        sa.Column("filename", sa.Text, nullable=False),
-        sa.Column("file_hash", sa.Text, nullable=False, unique=True),
-        sa.Column("source", sa.Text, nullable=True),
-        sa.Column("imported_at", sa.TIMESTAMP(timezone=True), server_default=sa.text("now()")),
-    )
+def _column_is_numeric(colinfo: dict) -> bool:
+    """
+    Heuristic: inspect the column type string and decide if it's numeric/decimal.
+    This is pragmatic and covers common DBMS type representations.
+    """
+    t = str(colinfo.get("type", "")).lower()
+    return "numeric" in t or "decimal" in t or "number" in t
 
-    # Convert numeric price columns to double precision (if present)
-    # These will work if the columns currently exist as numeric; if already double precision this is a no-op.
-    op.execute(
-        "ALTER TABLE trades ALTER COLUMN entry_price TYPE double precision USING entry_price::double precision;"
-    )
-    op.execute(
-        "ALTER TABLE trades ALTER COLUMN exit_price TYPE double precision USING exit_price::double precision;"
-    )
-    # Try to convert stop_loss if present
-    try:
-        op.execute(
-            "ALTER TABLE trades ALTER COLUMN stop_loss TYPE double precision USING stop_loss::double precision;"
+
+def upgrade():
+    # Create imported_files table if it does not exist (idempotent)
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    if not inspector.has_table("imported_files"):
+        op.create_table(
+            "imported_files",
+            sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+            sa.Column("filename", sa.Text, nullable=False),
+            sa.Column("file_hash", sa.Text, nullable=False, unique=True),
+            sa.Column("source", sa.Text, nullable=True),
+            sa.Column(
+                "imported_at",
+                sa.TIMESTAMP(timezone=True),
+                server_default=sa.text("now()"),
+            ),
         )
+
+    # Gather trades table columns if available
+    trades_cols = {}
+    try:
+        for c in inspector.get_columns("trades"):
+            trades_cols[c["name"]] = c
     except Exception:
-        # If stop_loss doesn't exist or is already correct, ignore the error
-        pass
+        trades_cols = {}
+
+    def try_alter(colname: str):
+        colinfo = trades_cols.get(colname)
+        if not colinfo:
+            # Column absent — skip and log
+            print(f"[alembic] Skipping ALTER for '{colname}': column not present")
+            return
+        if not _column_is_numeric(colinfo):
+            print(
+                f"[alembic] Skipping ALTER for '{colname}': column type is not numeric (detected: {colinfo.get('type')})"
+            )
+            return
+        # Safe to perform the ALTER; let unexpected failures surface so operator sees them
+        op.execute(
+            f"ALTER TABLE trades ALTER COLUMN {colname} TYPE double precision USING {colname}::double precision;"
+        )
+        print(f"[alembic] Converted column '{colname}' to double precision")
+
+    # Attempt conversions for specific columns
+    try_alter("entry_price")
+    try_alter("exit_price")
+    try_alter("stop_loss")
 
 
 def downgrade():
-    # Revert price columns back to numeric(20,8) (adjust precision/scale if needed)
-    op.execute(
-        "ALTER TABLE trades ALTER COLUMN entry_price TYPE numeric(20,8) USING entry_price::numeric(20,8);"
-    )
-    op.execute(
-        "ALTER TABLE trades ALTER COLUMN exit_price TYPE numeric(20,8) USING exit_price::numeric(20,8);"
-    )
+    # Revert price columns back to numeric(20,8) if present
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    trades_cols = {}
     try:
-        op.execute(
-            "ALTER TABLE trades ALTER COLUMN stop_loss TYPE numeric(20,8) USING stop_loss::numeric(20,8);"
-        )
+        for c in inspector.get_columns("trades"):
+            trades_cols[c["name"]] = c
     except Exception:
-        pass
+        trades_cols = {}
 
-    # Drop imported_files table
-    op.drop_table("imported_files")
+    def try_revert(colname: str):
+        colinfo = trades_cols.get(colname)
+        if not colinfo:
+            print(f"[alembic] Skipping revert for '{colname}': column not present")
+            return
+        op.execute(
+            f"ALTER TABLE trades ALTER COLUMN {colname} TYPE numeric(20,8) USING {colname}::numeric(20,8);"
+        )
+        print(f"[alembic] Reverted column '{colname}' to numeric(20,8)")
+
+    try_revert("entry_price")
+    try_revert("exit_price")
+    try_revert("stop_loss")

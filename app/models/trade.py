@@ -1,6 +1,7 @@
 from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Float, DateTime, func, Integer, Boolean
 
 
 class Base(DeclarativeBase):
@@ -14,7 +15,9 @@ class Trade(Base):
 
     # Core fields (match your sheet)
     ticker: Mapped[str] = mapped_column(String(30), index=True)  # BTC, ETH, etc.
-    direction: Mapped[str] = mapped_column(String(10))  # LONG / SHORT / SPOT (if you use it)
+    direction: Mapped[str] = mapped_column(
+        String(10)
+    )  # LONG / SHORT / SPOT (if you use it)
 
     entry_price: Mapped[float] = mapped_column(Float)
     exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -24,7 +27,9 @@ class Trade(Base):
     leverage: Mapped[float] = mapped_column(Float, default=1.0)
 
     entry_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    end_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     entry_summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
 

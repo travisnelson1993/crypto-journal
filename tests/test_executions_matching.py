@@ -1,5 +1,6 @@
-﻿from decimal import Decimal
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
+from decimal import Decimal
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -7,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import Base
 from app.models.executions import Execution
 from app.services.matcher import fifo_match_close
+
 
 @pytest.fixture
 def session():
@@ -20,6 +22,7 @@ def session():
         yield sess
     finally:
         sess.close()
+
 
 def test_fifo_partial_close(session):
     open1 = Execution(

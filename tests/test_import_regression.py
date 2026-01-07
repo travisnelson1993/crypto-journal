@@ -1,11 +1,11 @@
+import hashlib
 import os
-import sys
 import shutil
 import subprocess
+import sys
 import uuid
+
 import psycopg2
-import hashlib
-import pandas as pd
 import pytest
 
 SOURCE_NAME = "blofin_order_history"
@@ -34,21 +34,35 @@ def dsn():
 def cleanup_db(conn):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM trades WHERE source = %s", (SOURCE_NAME,))
-        cur.execute("DELETE FROM imported_files WHERE filename LIKE %s", ("test-sample-%",))
+        cur.execute(
+            "DELETE FROM imported_files WHERE filename LIKE %s", ("test-sample-%",)
+        )
     conn.commit()
 
 
 def run_importer(file_path, dsn):
     env = os.environ.copy()
     subprocess.check_call(
-        [sys.executable, "import_blofin_csv.py", "--input", str(file_path), "--db", dsn, "--archive-dir", str(os.path.dirname(file_path))],
+        [
+            sys.executable,
+            "import_blofin_csv.py",
+            "--input",
+            str(file_path),
+            "--db",
+            dsn,
+            "--archive-dir",
+            str(os.path.dirname(file_path)),
+        ],
         env=env,
     )
 
 
 def get_recent_source_filenames(conn, limit=100):
     with conn.cursor() as cur:
-        cur.execute("SELECT source_filename FROM trades WHERE source = %s ORDER BY created_at DESC LIMIT %s", (SOURCE_NAME, limit))
+        cur.execute(
+            "SELECT source_filename FROM trades WHERE source = %s ORDER BY created_at DESC LIMIT %s",
+            (SOURCE_NAME, limit),
+        )
         return [r[0] for r in cur.fetchall()]
 
 
@@ -67,8 +81,12 @@ def test_importer_records_source_filename(tmp_path, dsn):
     conn = get_conn(dsn)
     filenames = get_recent_source_filenames(conn)
     assert filenames, "No filenames found after import"
-    assert all(f is not None for f in filenames), "Not all trades have source_filename populated"
-    assert os.path.basename(str(in1)) in filenames, "source_filename not recorded as expected"
+    assert all(
+        f is not None for f in filenames
+    ), "Not all trades have source_filename populated"
+    assert (
+        os.path.basename(str(in1)) in filenames
+    ), "source_filename not recorded as expected"
 
     cleanup_db(conn)
     conn.close()

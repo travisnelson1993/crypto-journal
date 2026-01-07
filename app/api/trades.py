@@ -1,17 +1,16 @@
 import csv
 import io
 from datetime import datetime, timezone
-from typing import AsyncGenerator, Optional, Dict, List, Tuple
+from typing import AsyncGenerator, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, and_
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import AsyncSessionLocal
 from app.models.trade import Trade
 from app.schemas.trade import TradeCreate, TradeOut
-
 
 router = APIRouter(prefix="/api/trades", tags=["trades"])
 
@@ -227,7 +226,9 @@ async def import_csv(file: UploadFile = File(...), db: AsyncSession = Depends(ge
             if not ticker or not side or not order_time or not avg_fill:
                 skipped_rows += 1
                 if len(skipped_examples) < 5:
-                    skipped_examples.append({"reason": "missing required columns", "row": row})
+                    skipped_examples.append(
+                        {"reason": "missing required columns", "row": row}
+                    )
                 continue
 
             try:
@@ -249,7 +250,9 @@ async def import_csv(file: UploadFile = File(...), db: AsyncSession = Depends(ge
             if direction is None:
                 skipped_rows += 1
                 if len(skipped_examples) < 5:
-                    skipped_examples.append({"reason": "could not infer direction", "row": row})
+                    skipped_examples.append(
+                        {"reason": "could not infer direction", "row": row}
+                    )
                 continue
 
             if _is_close_row(side):
@@ -333,13 +336,17 @@ async def import_csv(file: UploadFile = File(...), db: AsyncSession = Depends(ge
             else:
                 skipped_rows += 1
                 if len(skipped_examples) < 5:
-                    skipped_examples.append({"reason": "unsupported side type", "row": row})
+                    skipped_examples.append(
+                        {"reason": "unsupported side type", "row": row}
+                    )
                 continue
 
         except Exception as e:
             skipped_rows += 1
             if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": f"parse error: {str(e)}", "row": row})
+                skipped_examples.append(
+                    {"reason": f"parse error: {str(e)}", "row": row}
+                )
 
     await db.commit()
 

@@ -1,10 +1,10 @@
-from typing import Any, Dict, List, Optional, Tuple
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status, Query
 import csv
 import io
 import re
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +20,7 @@ async def get_session() -> AsyncSession:
         yield session
 
 
-_qty_re = re.compile(r'([+-]?[0-9,]*\.?[0-9]+)')
+_qty_re = re.compile(r"([+-]?[0-9,]*\.?[0-9]+)")
 
 
 def parse_money(value: Optional[str]) -> Optional[float]:
@@ -57,7 +57,9 @@ def parse_qty_unit(filled: Optional[str]) -> Tuple[Optional[float], Optional[str
     m = _qty_re.search(s)
     if m:
         try:
-            return float(m.group(1).replace(",", "")), (parts[-1] if len(parts) > 1 else None)
+            return float(m.group(1).replace(",", "")), (
+                parts[-1] if len(parts) > 1 else None
+            )
         except Exception:
             return None, None
     return None, None
@@ -70,9 +72,9 @@ def parse_datetime_utc(s: Optional[str]) -> Optional[datetime]:
     s = s.strip()
 
     fmts = [
-        "%m/%d/%Y %H:%M:%S",          # Blofin example: 12/12/2025 16:19:06
-        "%Y-%m-%dT%H:%M:%S",          # ISO without Z
-        "%Y-%m-%dT%H:%M:%S.%f",       # ISO with ms
+        "%m/%d/%Y %H:%M:%S",  # Blofin example: 12/12/2025 16:19:06
+        "%Y-%m-%dT%H:%M:%S",  # ISO without Z
+        "%Y-%m-%dT%H:%M:%S.%f",  # ISO with ms
         "%m/%d/%Y",
     ]
     for f in fmts:
@@ -85,6 +87,7 @@ def parse_datetime_utc(s: Optional[str]) -> Optional[datetime]:
     # dateutil fallback if installed
     try:
         from dateutil.parser import parse as dateutil_parse
+
         dt = dateutil_parse(s)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -155,7 +158,9 @@ async def import_csv(
             or ""
         ).strip()
 
-        order_time = parse_datetime_utc(raw.get("Order Time") or raw.get("Order Date") or raw.get("Time"))
+        order_time = parse_datetime_utc(
+            raw.get("Order Time") or raw.get("Order Date") or raw.get("Time")
+        )
         avg_fill = parse_money(raw.get("Avg Fill"))
         price = parse_money(raw.get("Price"))
         filled_qty, filled_unit = parse_qty_unit(raw.get("Filled"))
@@ -202,7 +207,9 @@ async def import_csv(
                 Trade.direction == direction,
                 Trade.end_date.is_(None),
             )
-            .order_by(Trade.entry_date.desc())  # LIFO is usually best for exchange fills
+            .order_by(
+                Trade.entry_date.desc()
+            )  # LIFO is usually best for exchange fills
             .limit(1)
         )
         res = await session.execute(q)
@@ -220,19 +227,28 @@ async def import_csv(
         if not action or not direction:
             skipped_rows += 1
             if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": "could not infer action/direction", "row": r["raw"]})
+                skipped_examples.append(
+                    {"reason": "could not infer action/direction", "row": r["raw"]}
+                )
             continue
 
         if dt is None:
             skipped_rows += 1
             if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": "missing/invalid order_time", "row": r["raw"]})
+                skipped_examples.append(
+                    {"reason": "missing/invalid order_time", "row": r["raw"]}
+                )
             continue
 
         if px is None:
             skipped_rows += 1
             if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": "missing/invalid price (Avg Fill/Price)", "row": r["raw"]})
+                skipped_examples.append(
+                    {
+                        "reason": "missing/invalid price (Avg Fill/Price)",
+                        "row": r["raw"],
+                    }
+                )
             continue
 
         action = action.upper()
@@ -268,11 +284,11 @@ async def import_csv(
                 orphan = Trade(
                     ticker=ticker,
                     direction=direction,
-                    entry_price=px,   # placeholder so required field is satisfied
+                    entry_price=px,  # placeholder so required field is satisfied
                     exit_price=px,
                     stop_loss=None,
                     leverage=lev,
-                    entry_date=dt,    # set to close time to satisfy NOT NULL
+                    entry_date=dt,  # set to close time to satisfy NOT NULL
                     end_date=dt,
                     entry_summary=f"Imported (orphan close): {r['side_raw']}",
                     orphan_close=True,
@@ -285,7 +301,9 @@ async def import_csv(
         else:
             skipped_rows += 1
             if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": f"unknown action {action}", "row": r["raw"]})
+                skipped_examples.append(
+                    {"reason": f"unknown action {action}", "row": r["raw"]}
+                )
             continue
 
     try:

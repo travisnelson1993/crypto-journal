@@ -1,31 +1,34 @@
 ﻿import os
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
+
 from alembic import context
+from sqlalchemy import engine_from_config, pool
 
 config = context.config
 fileConfig(config.config_file_name)
 
-# Import your application's Base metadata here.
-# Adjust this import if your Base lives elsewhere.
-try:
-    from app.db.database import Base
-except Exception as e:
-    raise ImportError(f"Failed to import Base from app.db.database: {e}")
+# Import ONLY metadata (safe)
+from app.db.database import Base
 
 target_metadata = Base.metadata
 
-# Prefer DATABASE_URL env var if set (CI often uses this)
+# Prefer DATABASE_URL if set
 database_url = os.getenv("DATABASE_URL")
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 
+
 def run_migrations_offline():
     url = config.get_main_option("sqlalchemy.url")
-    context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+    )
 
     with context.begin_transaction():
         context.run_migrations()
+
 
 def run_migrations_online():
     connectable = engine_from_config(
@@ -35,10 +38,14 @@ def run_migrations_online():
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+        )
 
         with context.begin_transaction():
             context.run_migrations()
+
 
 if context.is_offline_mode():
     run_migrations_offline()

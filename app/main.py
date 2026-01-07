@@ -2,9 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # import your routers
-from app.api import trades as trades_router
-from app.api import stats as stats_router
 from app.api import imports as imports_router
+from app.api import stats as stats_router
+from app.api import trades as trades_router
 
 # Import your async engine and your Base metadata.
 # Adjust these imports if your database module uses different names.
@@ -27,6 +27,7 @@ app.add_middleware(
 app.include_router(trades_router.router)
 app.include_router(stats_router.router)
 app.include_router(imports_router.router)
+
 
 @app.on_event("startup")
 async def on_startup():
