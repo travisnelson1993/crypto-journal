@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.db.database import SessionLocal
+from app.db.database import AsyncSessionLocal
 from app.models.trade import Trade
 
 # Router
