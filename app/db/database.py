@@ -1,45 +1,58 @@
 ﻿import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+
 from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import declarative_base
 
-# Shared metadata
+# ------------------------------------------------------------------
+# Base (shared by sync + async)
+# ------------------------------------------------------------------
 Base = declarative_base()
 
-# Async DB URL (FastAPI runtime)
+# ------------------------------------------------------------------
+# Database URLs
+# ------------------------------------------------------------------
+
+SYNC_DATABASE_URL = os.getenv(
+    "CRYPTO_JOURNAL_DSN",
+    "postgresql://postgres:postgres@localhost:5432/crypto_journal",
+)
+
 ASYNC_DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql+asyncpg://postgres:postgres@localhost:5432/crypto_journal",
 )
 
-_engine: AsyncEngine | None = None
-_sessionmaker: async_sessionmaker[AsyncSession] | None = None
+# ------------------------------------------------------------------
+# Sync engine (Alembic, scripts)
+# ------------------------------------------------------------------
 
+engine = create_engine(
+    SYNC_DATABASE_URL,
+    pool_pre_ping=True,
+)
 
-def get_engine() -> AsyncEngine:
-    """Create async engine lazily (FastAPI only)."""
-    global _engine
-    if _engine is None:
-        _engine = create_async_engine(
-            ASYNC_DATABASE_URL,
-            echo=False,
-            future=True,
-        )
-    return _engine
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+)
 
+# ------------------------------------------------------------------
+# Async engine (FastAPI)
+# ------------------------------------------------------------------
 
-def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
-    """Create async sessionmaker lazily."""
-    global _sessionmaker
-    if _sessionmaker is None:
-        _sessionmaker = async_sessionmaker(
-            bind=get_engine(),
-            expire_on_commit=False,
-        )
-    return _sessionmaker
+async_engine = create_async_engine(
+    ASYNC_DATABASE_URL,
+    echo=False,
+)
 
-
+AsyncSessionLocal = async_sessionmaker(
+    bind=async_engine,
+    expire_on_commit=False,
+    class_=AsyncSession,
+)
