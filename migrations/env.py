@@ -11,29 +11,38 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Import metadata ONLY (safe)
+# Import metadata ONLY (safe – no engines created)
 from app.db.database import Base
+
 target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
     """
-    Resolve the database URL in a single, deterministic way.
+    Resolve a SYNC database URL for Alembic.
 
     Priority:
-    1. DATABASE_URL (GitHub Actions / CI)
-    2. CRYPTO_JOURNAL_DSN (local dev / importer)
+    1. DATABASE_URL
+    2. CRYPTO_JOURNAL_DSN
+
+    IMPORTANT:
+    - Alembic must NEVER use async drivers
+    - If '+asyncpg' is present, strip it
     """
-    return (
-        os.getenv("DATABASE_URL")
-        or os.getenv("CRYPTO_JOURNAL_DSN")
-    )
+    url = os.getenv("DATABASE_URL") or os.getenv("CRYPTO_JOURNAL_DSN")
+
+    if not url:
+        raise RuntimeError("DATABASE_URL or CRYPTO_JOURNAL_DSN must be set")
+
+    # Force sync driver for Alembic
+    if url.startswith("postgresql+asyncpg://"):
+        url = url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+    return url
 
 
 def run_migrations_offline():
     url = get_database_url()
-    if not url:
-        raise RuntimeError("DATABASE_URL or CRYPTO_JOURNAL_DSN must be set")
 
     context.configure(
         url=url,
@@ -48,10 +57,12 @@ def run_migrations_offline():
 
 def run_migrations_online():
     url = get_database_url()
-    if not url:
-        raise RuntimeError("DATABASE_URL or CRYPTO_JOURNAL_DSN must be set")
 
-    engine = create_engine(url, poolclass=pool.NullPool)
+    engine = create_engine(
+        url,
+        poolclass=pool.NullPool,
+        future=True,
+    )
 
     with engine.connect() as connection:
         context.configure(
