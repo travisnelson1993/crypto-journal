@@ -6,23 +6,20 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.database import AsyncSessionLocal
+from app.db.database import get_async_sessionmaker
 from app.models.trade import Trade
 
 # Router
 router = APIRouter(prefix="/api/import", tags=["imports"])
 
+# ---------------- DB dependency (ASYNC) ----------------
 
-# ---------------- DB dependency (SYNC) ----------------
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+async def get_db():
+    SessionLocal = get_async_sessionmaker()
+    async with SessionLocal() as session:
+        yield session
 
 
 # ---------------- helpers ----------------
@@ -31,26 +28,38 @@ _qty_re = re.compile(r"([+-]?[0-9,]*\.?[0-9]+)")
 
 
 def parse_money(value: Optional[str]) -> Optional[float]:
-    if not value:
+    if value is None:
         return None
-    v = value.strip().replace(",", "").replace("%", "")
+    v = str(value).strip()
     if v in ("", "--", "-"):
         return None
+
+    v = v.replace("%", "").strip()
+    v = re.sub(r"[A-Za-z]+$", "", v).strip()  # remove trailing units like "USDT"
+    v = v.replace(",", "")
+
     if v.startswith("(") and v.endswith(")"):
         v = "-" + v[1:-1]
+
     try:
         return float(v)
     except Exception:
         m = _qty_re.search(v)
-        return float(m.group(1)) if m else None
+        if m:
+            try:
+                return float(m.group(1))
+            except Exception:
+                return None
+        return None
 
 
 def parse_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
+    value = value.strip()
     for fmt in ("%m/%d/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y"):
         try:
-            return datetime.strptime(value.strip(), fmt)
+            return datetime.strptime(value, fmt)
         except Exception:
             pass
     return None
@@ -59,39 +68,58 @@ def parse_datetime(value: Optional[str]) -> Optional[datetime]:
 def heuristic_from_side(side: Optional[str]):
     if not side:
         return None, None, None
-    s = side.lower()
-    action = "OPEN" if "open" in s else "CLOSE" if "close" in s else None
-    direction = "LONG" if "long" in s else "SHORT" if "short" in s else None
-    reason = "TP" if "tp" in s else "SL" if "sl" in s else None
+    s = str(side).strip().lower()
+
+    action = None
+    if s.startswith("open") or " open" in s:
+        action = "OPEN"
+    elif s.startswith("close") or " close" in s:
+        action = "CLOSE"
+
+    direction = None
+    if "long" in s:
+        direction = "LONG"
+    elif "short" in s:
+        direction = "SHORT"
+
+    reason = None
+    if "tp" in s or "take profit" in s:
+        reason = "TP"
+    elif "sl" in s or "stop" in s:
+        reason = "SL"
+
     return action, direction, reason
 
 
 # ---------------- endpoint ----------------
 
 @router.post("/csv", status_code=status.HTTP_200_OK)
-def import_csv(
+async def import_csv(
     file: UploadFile = File(...),
     mode: str = Query("append", pattern="^(append|replace)$"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(400, "Please upload a CSV file")
+        raise HTTPException(status_code=400, detail="Please upload a CSV file")
 
-    contents = file.file.read()
+    contents = await file.read()
     if not contents:
-        raise HTTPException(400, "Empty CSV")
+        raise HTTPException(status_code=400, detail="Empty CSV")
 
     reader = csv.DictReader(io.StringIO(contents.decode(errors="replace")))
 
     if mode == "replace":
-        db.execute(delete(Trade))
-        db.commit()
+        await db.execute(delete(Trade))
+        await db.commit()
 
-    created = closed = orphan = skipped = 0
+    created = 0
+    closed = 0
+    orphan = 0
+    skipped = 0
     skipped_examples: List[Dict[str, Any]] = []
 
     for raw in reader:
-        action, direction, _ = heuristic_from_side(raw.get("Side"))
+        action, direction, _ = heuristic_from_side(raw.get("Side") or raw.get("side"))
         symbol = (
             raw.get("Underlying Asset")
             or raw.get("Ticker")
@@ -102,11 +130,17 @@ def import_csv(
         if not action or not direction or not symbol:
             skipped += 1
             if len(skipped_examples) < 5:
-                skipped_examples.append(raw)
+                skipped_examples.append({"reason": "missing action/direction/symbol", "row": raw})
             continue
 
-        entry_date = parse_datetime(raw.get("Order Time"))
+        entry_date = parse_datetime(raw.get("Order Time") or raw.get("Order Date"))
         price = parse_money(raw.get("Avg Fill"))
+
+        if price is None:
+            skipped += 1
+            if len(skipped_examples) < 5:
+                skipped_examples.append({"reason": "missing/invalid Avg Fill", "row": raw})
+            continue
 
         if action == "OPEN":
             db.add(
@@ -121,19 +155,17 @@ def import_csv(
             created += 1
 
         else:  # CLOSE
-            open_trade = (
-                db.execute(
-                    select(Trade)
-                    .where(
-                        Trade.ticker == symbol,
-                        Trade.direction == direction,
-                        Trade.end_date.is_(None),
-                    )
-                    .order_by(Trade.entry_date.desc())
+            result = await db.execute(
+                select(Trade)
+                .where(
+                    Trade.ticker == symbol,
+                    Trade.direction == direction,
+                    Trade.end_date.is_(None),
                 )
-                .scalars()
-                .first()
+                .order_by(Trade.entry_date.desc())
+                .limit(1)
             )
+            open_trade = result.scalars().first()
 
             if open_trade:
                 open_trade.exit_price = price
@@ -154,7 +186,7 @@ def import_csv(
                 )
                 orphan += 1
 
-    db.commit()
+    await db.commit()
 
     return {
         "ok": True,

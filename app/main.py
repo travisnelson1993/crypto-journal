@@ -7,21 +7,27 @@ from app.api import trades as trades_router
 
 app = FastAPI(title="Crypto Journal API")
 
-# CORS – permissive for local dev
+# -------------------------------------------------
+# CORS (permissive for local dev; restrict in prod)
+# -------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in prod
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# -------------------------------------------------
 # Routers
+# -------------------------------------------------
 app.include_router(trades_router.router)
 app.include_router(stats_router.router)
 app.include_router(imports_router.router)
 
-
+# -------------------------------------------------
+# Health check (CI / uptime / sanity)
+# -------------------------------------------------
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}

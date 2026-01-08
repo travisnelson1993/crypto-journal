@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.database import AsyncSessionLocal
+from app.db.database import get_async_sessionmaker
 from app.models.enums import TradeDirection
 from app.models.trade import Trade
 from app.services.metrics import compute_sheet_metrics
@@ -15,14 +15,27 @@ from app.services.metrics import compute_sheet_metrics
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
 
+# ---------------------------
+# DB dependency (ASYNC)
+# ---------------------------
+
 async def get_db() -> AsyncSession:
-    async with AsyncSessionLocal() as session:
+    SessionLocal = get_async_sessionmaker()
+    async with SessionLocal() as session:
         yield session
 
+
+# ---------------------------
+# helpers
+# ---------------------------
 
 def _round2(x: float) -> float:
     return round(float(x), 2)
 
+
+# ---------------------------
+# endpoints
+# ---------------------------
 
 @router.get("/monthly")
 async def monthly_stats(db: AsyncSession = Depends(get_db)) -> List[Dict[str, Any]]:
@@ -31,7 +44,7 @@ async def monthly_stats(db: AsyncSession = Depends(get_db)) -> List[Dict[str, An
 
     - trades: counts ALL trades opened that month (even if still open)
     - performance stats: only count CLOSED trades (exit_price is not None)
-    - R:R is SIGNED (losers negative) and matches your Google Sheets formulas
+    - R:R is SIGNED (losers negative) and matches Google Sheets formulas
     """
     result = await db.execute(
         select(Trade).order_by(Trade.entry_date.asc(), Trade.id.asc())
@@ -40,6 +53,8 @@ async def monthly_stats(db: AsyncSession = Depends(get_db)) -> List[Dict[str, An
 
     buckets: Dict[str, List[Trade]] = defaultdict(list)
     for t in trades:
+        if not t.entry_date:
+            continue
         month = t.entry_date.strftime("%Y-%m")
         buckets[month].append(t)
 
@@ -47,10 +62,8 @@ async def monthly_stats(db: AsyncSession = Depends(get_db)) -> List[Dict[str, An
 
     for month, month_trades in sorted(buckets.items()):
         trades_count = len(month_trades)
-
         closed = [t for t in month_trades if t.exit_price is not None]
 
-        # Compute per-closed-trade metrics (sheet exact)
         pnl_list: List[float] = []
         lev_pnl_list: List[float] = []
         rr_list: List[float] = []
@@ -82,39 +95,16 @@ async def monthly_stats(db: AsyncSession = Depends(get_db)) -> List[Dict[str, An
 
         closed_trades = len(closed)
 
-        # Sheet formulas:
-        # Win Rate % = wins / (wins + losses)
         denom = wins + losses
         win_rate_pct = _round2((wins / denom) * 100.0) if denom > 0 else 0.0
-
-        # Gains % = SUM(K)
         gains_pct = _round2(sum(pnl_list)) if pnl_list else 0.0
-
-        # Avg. Return % = AVERAGE(K)
         avg_return_pct = _round2(sum(pnl_list) / len(pnl_list)) if pnl_list else 0.0
-
-        # Lev. Gains % = SUM(L)
         lev_gains_pct = _round2(sum(lev_pnl_list)) if lev_pnl_list else 0.0
-
-        # Avg. Return (Lev.) = AVERAGE(L)
         avg_return_lev_pct = (
             _round2(sum(lev_pnl_list) / len(lev_pnl_list)) if lev_pnl_list else 0.0
         )
-
-        # Total R:R = SUM(M)
         total_rr = _round2(sum(rr_list)) if rr_list else 0.0
-
-        # Avg. R:R = ROUND(AVERAGE(M),2)
         avg_rr = _round2(sum(rr_list) / len(rr_list)) if rr_list else 0.0
-
-        # Largest Win % = MAX(K)
-        largest_win_pct = max(pnl_list) if pnl_list else 0.0
-
-        # Largest Lev. % = MAX(L)
-        largest_lev_win_pct = max(lev_pnl_list) if lev_pnl_list else 0.0
-
-        # Largest R:R Win = MAX(M)
-        largest_rr_win = max(rr_list) if rr_list else 0.0
 
         out.append(
             {
@@ -131,9 +121,9 @@ async def monthly_stats(db: AsyncSession = Depends(get_db)) -> List[Dict[str, An
                 "avg_return_lev_pct": avg_return_lev_pct,
                 "total_rr": total_rr,
                 "avg_rr": avg_rr,
-                "largest_win_pct": largest_win_pct,
-                "largest_lev_win_pct": largest_lev_win_pct,
-                "largest_rr_win": largest_rr_win,
+                "largest_win_pct": max(pnl_list) if pnl_list else 0.0,
+                "largest_lev_win_pct": max(lev_pnl_list) if lev_pnl_list else 0.0,
+                "largest_rr_win": max(rr_list) if rr_list else 0.0,
             }
         )
 

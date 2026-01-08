@@ -1,363 +1,198 @@
 import csv
 import io
-from datetime import datetime, timezone
-from typing import AsyncGenerator, Optional, Tuple
+import re
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, select
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.database import AsyncSessionLocal
+from app.db.database import get_async_sessionmaker
 from app.models.trade import Trade
-from app.schemas.trade import TradeCreate, TradeOut
 
-router = APIRouter(prefix="/api/trades", tags=["trades"])
+# Router
+router = APIRouter(prefix="/api/import", tags=["imports"])
 
+# ---------------- DB dependency (ASYNC) ----------------
 
-def _parse_blofin_datetime(s: str) -> datetime:
-    # Example: "12/12/2025 16:19:06"
-    dt = datetime.strptime(s.strip(), "%m/%d/%Y %H:%M:%S")
-    return dt.replace(tzinfo=timezone.utc)
-
-
-def _normalize_side_text(side: str) -> str:
-    return side.strip().lower()
-
-
-def _direction_from_side(side: str) -> Optional[str]:
-    s = _normalize_side_text(side)
-    if "long" in s:
-        return "LONG"
-    if "short" in s:
-        return "SHORT"
-    return None
-
-
-def _is_open_row(side: str) -> bool:
-    s = _normalize_side_text(side)
-    return s.startswith("open")
-
-
-def _is_close_row(side: str) -> bool:
-    s = _normalize_side_text(side)
-    return s.startswith("close")
-
-
-# ---------------------------
-# DB dependency
-# ---------------------------
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
+async def get_db():
+    SessionLocal = get_async_sessionmaker()
+    async with SessionLocal() as session:
         yield session
 
 
-# ---------------------------
-# Helpers (BloFin parsing)
-# ---------------------------
-def _parse_float(value: Optional[str]) -> Optional[float]:
+# ---------------- helpers ----------------
+
+_qty_re = re.compile(r"([+-]?[0-9,]*\.?[0-9]+)")
+
+
+def parse_money(value: Optional[str]) -> Optional[float]:
     if value is None:
         return None
-    s = str(value).strip()
-    if s == "" or s == "--":
+    v = str(value).strip()
+    if v in ("", "--", "-"):
         return None
-    # BloFin values like "0.38019 USDT" -> 0.38019
-    s = s.replace(",", "")
-    first = s.split()[0]
+
+    v = v.replace("%", "").strip()
+    v = re.sub(r"[A-Za-z]+$", "", v).strip()  # remove trailing units like "USDT"
+    v = v.replace(",", "")
+
+    if v.startswith("(") and v.endswith(")"):
+        v = "-" + v[1:-1]
+
     try:
-        return float(first)
-    except ValueError:
+        return float(v)
+    except Exception:
+        m = _qty_re.search(v)
+        if m:
+            try:
+                return float(m.group(1))
+            except Exception:
+                return None
         return None
 
 
-def _parse_blofin_time(value: str) -> datetime:
-    """
-    BloFin Order Time looks like: '12/19/2025 05:57:22'
-    We'll treat it as UTC for now and store timezone-aware UTC.
-    """
-    dt_naive = datetime.strptime(value.strip(), "%m/%d/%Y %H:%M:%S")
-    return dt_naive.replace(tzinfo=timezone.utc)
-
-
-def _parse_side(side: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Returns (action, direction):
-      action: "OPEN" or "CLOSE"
-      direction: "LONG" or "SHORT"
-    Examples:
-      "Open Short" -> ("OPEN","SHORT")
-      "Close Long(TP)" -> ("CLOSE","LONG")
-    """
-    s = (side or "").strip().upper()
-    if s.startswith("OPEN"):
-        if "LONG" in s:
-            return ("OPEN", "LONG")
-        if "SHORT" in s:
-            return ("OPEN", "SHORT")
-    if s.startswith("CLOSE"):
-        if "LONG" in s:
-            return ("CLOSE", "LONG")
-        if "SHORT" in s:
-            return ("CLOSE", "SHORT")
-    return (None, None)
-
-
-# ---------------------------
-# CRUD
-# ---------------------------
-@router.get("/", response_model=list[TradeOut])
-async def list_trades(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Trade).order_by(Trade.id.desc()))
-    return list(result.scalars().all())
-
-
-@router.get("/{trade_id}", response_model=TradeOut)
-async def get_trade(trade_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Trade).where(Trade.id == trade_id))
-    trade = result.scalar_one_or_none()
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-    return trade
-
-
-@router.post("/", response_model=TradeOut, status_code=201)
-async def create_trade(payload: TradeCreate, db: AsyncSession = Depends(get_db)):
-    trade = Trade(**payload.model_dump())
-    db.add(trade)
-    await db.commit()
-    await db.refresh(trade)
-    return trade
-
-
-@router.delete("/{trade_id}")
-async def delete_trade(trade_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Trade).where(Trade.id == trade_id))
-    trade = result.scalar_one_or_none()
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-    await db.delete(trade)
-    await db.commit()
-    return {"ok": True}
-
-
-# ---------------------------
-# Export CSV (simple)
-# ---------------------------
-@router.get("/export/csv")
-async def export_csv(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Trade).order_by(Trade.id.asc()))
-    trades = list(result.scalars().all())
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(
-        [
-            "id",
-            "ticker",
-            "direction",
-            "entry_price",
-            "exit_price",
-            "stop_loss",
-            "leverage",
-            "entry_date",
-            "end_date",
-            "entry_summary",
-        ]
-    )
-    for t in trades:
-        writer.writerow(
-            [
-                t.id,
-                t.ticker,
-                t.direction,
-                t.entry_price,
-                t.exit_price,
-                t.stop_loss,
-                t.leverage,
-                t.entry_date.isoformat() if t.entry_date else "",
-                t.end_date.isoformat() if t.end_date else "",
-                t.entry_summary or "",
-            ]
-        )
-
-    output.seek(0)
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=trades_export.csv"},
-    )
-
-
-# ---------------------------
-# IMPORT CSV (BloFin Order History)
-# ---------------------------
-# NOTE: This old importer route was renamed to avoid collision with the newer importer
-@router.post("/import/csv_old")
-async def import_csv(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
-    """
-    Blofin CSV importer:
-    - Matches CLOSE rows to existing OPEN trades in the DB (so future CSVs can complete trades)
-    - If CLOSE has no matching OPEN, creates an orphan_close trade
-    - If OPEN arrives later and an orphan_close exists, merges them
-    """
-    if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a .csv file")
-
-    content = await file.read()
-    text = content.decode("utf-8-sig", errors="ignore")
-    reader = csv.DictReader(io.StringIO(text))
-
-    created_trades = 0
-    closed_trades = 0
-    orphan_closes_created = 0
-    merged_orphans = 0
-    skipped_rows = 0
-    skipped_examples: list[dict] = []
-
-    for row in reader:
+def parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    value = value.strip()
+    for fmt in ("%m/%d/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y"):
         try:
-            ticker = (row.get("Underlying Asset") or "").strip()
-            side = (row.get("Side") or "").strip()
-            lev_str = (row.get("Leverage") or "1").strip()
-            order_time = (row.get("Order Time") or "").strip()
-            avg_fill_field = (row.get("Avg Fill") or "").strip()
-            avg_fill = avg_fill_field.split()[0].strip() if avg_fill_field else ""
+            return datetime.strptime(value, fmt)
+        except Exception:
+            pass
+    return None
 
-            if not ticker or not side or not order_time or not avg_fill:
-                skipped_rows += 1
-                if len(skipped_examples) < 5:
-                    skipped_examples.append(
-                        {"reason": "missing required columns", "row": row}
-                    )
-                continue
 
-            try:
-                leverage = float(lev_str)
-            except Exception:
-                leverage = 1.0
+def heuristic_from_side(side: Optional[str]):
+    if not side:
+        return None, None, None
+    s = str(side).strip().lower()
 
-            try:
-                price = float(avg_fill)
-            except Exception:
-                skipped_rows += 1
-                if len(skipped_examples) < 5:
-                    skipped_examples.append({"reason": "invalid price", "row": row})
-                continue
+    action = None
+    if s.startswith("open") or " open" in s:
+        action = "OPEN"
+    elif s.startswith("close") or " close" in s:
+        action = "CLOSE"
 
-            dt = _parse_blofin_datetime(order_time)
-            direction = _direction_from_side(side)
+    direction = None
+    if "long" in s:
+        direction = "LONG"
+    elif "short" in s:
+        direction = "SHORT"
 
-            if direction is None:
-                skipped_rows += 1
-                if len(skipped_examples) < 5:
-                    skipped_examples.append(
-                        {"reason": "could not infer direction", "row": row}
-                    )
-                continue
+    reason = None
+    if "tp" in s or "take profit" in s:
+        reason = "TP"
+    elif "sl" in s or "stop" in s:
+        reason = "SL"
 
-            if _is_close_row(side):
-                result = await db.execute(
-                    select(Trade)
-                    .where(
-                        and_(
-                            Trade.ticker == ticker,
-                            Trade.direction == direction,
-                            Trade.exit_price.is_(None),
-                            Trade.orphan_close.is_(False),
-                        )
-                    )
-                    .order_by(Trade.entry_date.desc())
-                    .limit(1)
+    return action, direction, reason
+
+
+# ---------------- endpoint ----------------
+
+@router.post("/csv", status_code=status.HTTP_200_OK)
+async def import_csv(
+    file: UploadFile = File(...),
+    mode: str = Query("append", pattern="^(append|replace)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty CSV")
+
+    reader = csv.DictReader(io.StringIO(contents.decode(errors="replace")))
+
+    if mode == "replace":
+        await db.execute(delete(Trade))
+        await db.commit()
+
+    created = 0
+    closed = 0
+    orphan = 0
+    skipped = 0
+    skipped_examples: List[Dict[str, Any]] = []
+
+    for raw in reader:
+        action, direction, _ = heuristic_from_side(raw.get("Side") or raw.get("side"))
+        symbol = (
+            raw.get("Underlying Asset")
+            or raw.get("Ticker")
+            or raw.get("symbol")
+            or ""
+        ).strip()
+
+        if not action or not direction or not symbol:
+            skipped += 1
+            if len(skipped_examples) < 5:
+                skipped_examples.append({"reason": "missing action/direction/symbol", "row": raw})
+            continue
+
+        entry_date = parse_datetime(raw.get("Order Time") or raw.get("Order Date"))
+        price = parse_money(raw.get("Avg Fill"))
+
+        if price is None:
+            skipped += 1
+            if len(skipped_examples) < 5:
+                skipped_examples.append({"reason": "missing/invalid Avg Fill", "row": raw})
+            continue
+
+        if action == "OPEN":
+            db.add(
+                Trade(
+                    ticker=symbol,
+                    direction=direction,
+                    entry_price=price,
+                    entry_date=entry_date or datetime.utcnow(),
+                    source="blofin_order_history",
                 )
-                open_trade = result.scalar_one_or_none()
+            )
+            created += 1
 
-                if open_trade:
-                    open_trade.exit_price = price
-                    open_trade.end_date = dt
-                    closed_trades += 1
-                else:
-                    orphan = Trade(
-                        ticker=ticker,
+        else:  # CLOSE
+            result = await db.execute(
+                select(Trade)
+                .where(
+                    Trade.ticker == symbol,
+                    Trade.direction == direction,
+                    Trade.end_date.is_(None),
+                )
+                .order_by(Trade.entry_date.desc())
+                .limit(1)
+            )
+            open_trade = result.scalars().first()
+
+            if open_trade:
+                open_trade.exit_price = price
+                open_trade.end_date = entry_date or datetime.utcnow()
+                closed += 1
+            else:
+                db.add(
+                    Trade(
+                        ticker=symbol,
                         direction=direction,
                         entry_price=price,
                         exit_price=price,
-                        stop_loss=None,
-                        leverage=leverage,
-                        entry_date=dt,
-                        end_date=dt,
-                        entry_summary="Blofin import (close-only; open not found yet)",
+                        entry_date=entry_date or datetime.utcnow(),
+                        end_date=entry_date or datetime.utcnow(),
                         orphan_close=True,
                         source="blofin_order_history",
                     )
-                    db.add(orphan)
-                    orphan_closes_created += 1
-
-            elif _is_open_row(side):
-                trade = Trade(
-                    ticker=ticker,
-                    direction=direction,
-                    entry_price=price,
-                    exit_price=None,
-                    stop_loss=None,
-                    leverage=leverage,
-                    entry_date=dt,
-                    end_date=None,
-                    entry_summary="Blofin import (open)",
-                    orphan_close=False,
-                    source="blofin_order_history",
                 )
-
-                orphan_result = await db.execute(
-                    select(Trade)
-                    .where(
-                        and_(
-                            Trade.ticker == ticker,
-                            Trade.direction == direction,
-                            Trade.orphan_close.is_(True),
-                            Trade.end_date >= dt,
-                        )
-                    )
-                    .order_by(Trade.end_date.asc())
-                    .limit(1)
-                )
-                orphan = orphan_result.scalar_one_or_none()
-
-                if orphan:
-                    trade.exit_price = orphan.exit_price
-                    trade.end_date = orphan.end_date
-                    trade.orphan_close = False
-                    await db.delete(orphan)
-                    merged_orphans += 1
-                    closed_trades += 1
-
-                db.add(trade)
-                created_trades += 1
-
-            else:
-                skipped_rows += 1
-                if len(skipped_examples) < 5:
-                    skipped_examples.append(
-                        {"reason": "unsupported side type", "row": row}
-                    )
-                continue
-
-        except Exception as e:
-            skipped_rows += 1
-            if len(skipped_examples) < 5:
-                skipped_examples.append(
-                    {"reason": f"parse error: {str(e)}", "row": row}
-                )
+                orphan += 1
 
     await db.commit()
 
     return {
         "ok": True,
-        "source": "blofin_order_history",
-        "created_trades": created_trades,
-        "closed_trades": closed_trades,
-        "orphan_closes_created": orphan_closes_created,
-        "merged_orphans": merged_orphans,
-        "skipped_rows": skipped_rows,
+        "created_trades": created,
+        "closed_trades": closed,
+        "orphan_closes_created": orphan,
+        "skipped_rows": skipped,
         "skipped_examples": skipped_examples,
-        "note": "Importer matches against existing DB opens; monthly stats are bucketed by entry_date month.",
     }
