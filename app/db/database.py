@@ -1,6 +1,12 @@
 ﻿import os
+from typing import AsyncGenerator
 
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -17,7 +23,10 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] | None = None
 def get_async_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
-        _engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
+        _engine = create_async_engine(
+            DATABASE_URL,
+            pool_pre_ping=True,
+        )
     return _engine
 
 
@@ -30,3 +39,10 @@ def get_async_sessionmaker() -> async_sessionmaker[AsyncSession]:
             autoflush=False,
         )
     return AsyncSessionLocal
+
+
+# ✅ FastAPI dependency (THIS is what was missing)
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    sessionmaker = get_async_sessionmaker()
+    async with sessionmaker() as session:
+        yield session

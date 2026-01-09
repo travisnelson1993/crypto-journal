@@ -8,18 +8,11 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.database import get_async_sessionmaker
+from app.db.database import get_db
 from app.models.trade import Trade
 
 # Router
 router = APIRouter(prefix="/api/import", tags=["imports"])
-
-# ---------------- DB dependency (ASYNC) ----------------
-
-async def get_db():
-    SessionLocal = get_async_sessionmaker()
-    async with SessionLocal() as session:
-        yield session
 
 
 # ---------------- helpers ----------------

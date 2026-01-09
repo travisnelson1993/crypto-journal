@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import imports as imports_router
 from app.api import stats as stats_router
 from app.api import trades as trades_router
+from app.api import positions as positions_router
 
 app = FastAPI(title="Crypto Journal API")
 
@@ -24,6 +25,7 @@ app.add_middleware(
 app.include_router(trades_router.router)
 app.include_router(stats_router.router)
 app.include_router(imports_router.router)
+app.include_router(positions_router.router)
 
 # -------------------------------------------------
 # Health check (CI / uptime / sanity)
