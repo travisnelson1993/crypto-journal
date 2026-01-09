@@ -55,6 +55,7 @@ def test_open_then_partial_close():
     assert pos.closed_qty == Decimal("0.05")
     assert pos.remaining_qty == Decimal("0.05")
     assert pos.realized_pnl == Decimal("100.0")  # 0.05 * (102k - 100k)
+    assert pos.unrealized_pnl is None
 
 
 def test_multiple_dca_and_closes():
@@ -70,3 +71,20 @@ def test_multiple_dca_and_closes():
     assert pos.closed_qty == Decimal("0.15")
     assert pos.remaining_qty == Decimal("0.05")
     assert pos.realized_pnl > 0
+    assert pos.unrealized_pnl is None
+
+
+def test_unrealized_pnl_long_position():
+    trades = [
+        FakeTrade(1, "BTCUSDT", "LONG", 0.10, 100_000, True),
+        FakeTrade(1, "BTCUSDT", "LONG", 0.05, 100_000, False, exit_price=101_000),
+    ]
+
+    pos = build_position_snapshot(trades, current_price=102_000)
+
+    # remaining = 0.05
+    # avg entry = 100_000
+    # unrealized = 0.05 * (102k - 100k) = 100
+    assert pos.remaining_qty == Decimal("0.05")
+    assert pos.unrealized_pnl == Decimal("100.0")
+
