@@ -33,10 +33,8 @@ def dsn():
 
 def cleanup_db(conn):
     with conn.cursor() as cur:
-        cur.execute("DELETE FROM trades WHERE source = %s", (SOURCE_NAME,))
-        cur.execute(
-            "DELETE FROM imported_files WHERE filename LIKE %s", ("test-sample-%",)
-        )
+        cur.execute("DELETE FROM trades;")
+        cur.execute("DELETE FROM imported_files;")
     conn.commit()
 
 
