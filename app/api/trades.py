@@ -1,191 +1,127 @@
-import csv
-import io
-import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from decimal import Decimal
+from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from sqlalchemy import delete, select
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
 from app.models.trade import Trade
+from app.services.trade_close import close_trade
 
-# Router
-router = APIRouter(prefix="/api/import", tags=["imports"])
-
-
-# ---------------- helpers ----------------
-
-_qty_re = re.compile(r"([+-]?[0-9,]*\.?[0-9]+)")
+# -------------------------------------------------
+# Trades Router
+# -------------------------------------------------
+router = APIRouter(prefix="/api/trades", tags=["trades"])
 
 
-def parse_money(value: Optional[str]) -> Optional[float]:
-    if value is None:
-        return None
-    v = str(value).strip()
-    if v in ("", "--", "-"):
-        return None
+# -------------------------------------------------
+# Read-only lifecycle / ledger view
+# -------------------------------------------------
+@router.get("/lifecycle")
+async def trade_lifecycle(db: AsyncSession = Depends(get_db)):
+    """
+    One row per trade (execution lifecycle view).
+    This is an audit-style endpoint, not used for analytics.
+    """
 
-    v = v.replace("%", "").strip()
-    v = re.sub(r"[A-Za-z]+$", "", v).strip()  # remove trailing units like "USDT"
-    v = v.replace(",", "")
+    stmt = select(Trade).order_by(Trade.entry_date.asc())
+    result = await db.execute(stmt)
+    trades = result.scalars().all()
 
-    if v.startswith("(") and v.endswith(")"):
-        v = "-" + v[1:-1]
+    rows = []
 
-    try:
-        return float(v)
-    except Exception:
-        m = _qty_re.search(v)
-        if m:
-            try:
-                return float(m.group(1))
-            except Exception:
-                return None
-        return None
+    for t in trades:
+        # ---------- STATUS ----------
+        if t.end_date is None:
+            if t.original_quantity > t.quantity:
+                status = "PARTIAL"
+            else:
+                status = "OPEN"
+        else:
+            status = "CLOSED"
 
+        # ---------- PNL ----------
+        pnl_pct = t.realized_pnl_pct
+        lev_pnl_pct = (
+            pnl_pct * t.leverage
+            if pnl_pct is not None and t.leverage is not None
+            else None
+        )
 
-def parse_datetime(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    value = value.strip()
-    for fmt in ("%m/%d/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y"):
-        try:
-            return datetime.strptime(value, fmt)
-        except Exception:
-            pass
-    return None
+        rows.append(
+            {
+                "id": t.id,
+                "ticker": t.ticker,
+                "direction": t.direction,
+                "entry_price": float(t.entry_price) if t.entry_price else None,
+                "exit_price": float(t.exit_price) if t.exit_price else None,
+                "entry_date": t.entry_date.isoformat() if t.entry_date else None,
+                "end_date": t.end_date.isoformat() if t.end_date else None,
+                "original_quantity": float(t.original_quantity),
+                "quantity": float(t.quantity),
+                "leverage": float(t.leverage) if t.leverage else 1.0,
+                "status": status,
+                "pnl_pct": float(pnl_pct) if pnl_pct is not None else None,
+                "lev_pnl_pct": float(lev_pnl_pct) if lev_pnl_pct is not None else None,
+                "risk_reward": None,  # computed in journal
+            }
+        )
 
-
-def heuristic_from_side(side: Optional[str]):
-    if not side:
-        return None, None, None
-    s = str(side).strip().lower()
-
-    action = None
-    if s.startswith("open") or " open" in s:
-        action = "OPEN"
-    elif s.startswith("close") or " close" in s:
-        action = "CLOSE"
-
-    direction = None
-    if "long" in s:
-        direction = "LONG"
-    elif "short" in s:
-        direction = "SHORT"
-
-    reason = None
-    if "tp" in s or "take profit" in s:
-        reason = "TP"
-    elif "sl" in s or "stop" in s:
-        reason = "SL"
-
-    return action, direction, reason
+    return rows
 
 
-# ---------------- endpoint ----------------
+# -------------------------------------------------
+# Trade close (mutation endpoint)
+# -------------------------------------------------
+class CloseTradeRequest(BaseModel):
+    exit_price: Decimal = Field(..., gt=Decimal("0"))
+    end_date: Optional[datetime] = None
+    fee: Optional[Decimal] = None
 
-@router.post("/csv", status_code=status.HTTP_200_OK)
-async def import_csv(
-    file: UploadFile = File(...),
-    mode: str = Query("append", pattern="^(append|replace)$"),
+
+@router.post("/{trade_id}/close")
+async def close_trade_endpoint(
+    trade_id: int,
+    payload: CloseTradeRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+    """
+    Close a trade and compute realized PnL immediately.
+    This is the ONLY place realized PnL is written.
+    """
 
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Empty CSV")
+    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    trade = result.scalar_one_or_none()
 
-    reader = csv.DictReader(io.StringIO(contents.decode(errors="replace")))
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
 
-    if mode == "replace":
-        await db.execute(delete(Trade))
-        await db.commit()
+    if trade.end_date is not None:
+        raise HTTPException(status_code=400, detail="Trade already closed")
 
-    created = 0
-    closed = 0
-    orphan = 0
-    skipped = 0
-    skipped_examples: List[Dict[str, Any]] = []
-
-    for raw in reader:
-        action, direction, _ = heuristic_from_side(raw.get("Side") or raw.get("side"))
-        symbol = (
-            raw.get("Underlying Asset")
-            or raw.get("Ticker")
-            or raw.get("symbol")
-            or ""
-        ).strip()
-
-        if not action or not direction or not symbol:
-            skipped += 1
-            if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": "missing action/direction/symbol", "row": raw})
-            continue
-
-        entry_date = parse_datetime(raw.get("Order Time") or raw.get("Order Date"))
-        price = parse_money(raw.get("Avg Fill"))
-
-        if price is None:
-            skipped += 1
-            if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": "missing/invalid Avg Fill", "row": raw})
-            continue
-
-        if action == "OPEN":
-            db.add(
-                Trade(
-                    ticker=symbol,
-                    direction=direction,
-                    entry_price=price,
-                    entry_date=entry_date or datetime.utcnow(),
-                    source="blofin_order_history",
-                )
-            )
-            created += 1
-
-        else:  # CLOSE
-            result = await db.execute(
-                select(Trade)
-                .where(
-                    Trade.ticker == symbol,
-                    Trade.direction == direction,
-                    Trade.end_date.is_(None),
-                )
-                .order_by(Trade.entry_date.desc())
-                .limit(1)
-            )
-            open_trade = result.scalars().first()
-
-            if open_trade:
-                open_trade.exit_price = price
-                open_trade.end_date = entry_date or datetime.utcnow()
-                closed += 1
-            else:
-                db.add(
-                    Trade(
-                        ticker=symbol,
-                        direction=direction,
-                        entry_price=price,
-                        exit_price=price,
-                        entry_date=entry_date or datetime.utcnow(),
-                        end_date=entry_date or datetime.utcnow(),
-                        orphan_close=True,
-                        source="blofin_order_history",
-                    )
-                )
-                orphan += 1
+    close_trade(
+        trade=trade,
+        exit_price=payload.exit_price,
+        closed_at=payload.end_date,
+        fee=payload.fee,
+    )
 
     await db.commit()
+    await db.refresh(trade)
 
     return {
-        "ok": True,
-        "created_trades": created,
-        "closed_trades": closed,
-        "orphan_closes_created": orphan,
-        "skipped_rows": skipped,
-        "skipped_examples": skipped_examples,
+        "id": trade.id,
+        "ticker": trade.ticker,
+        "direction": trade.direction,
+        "original_quantity": float(trade.original_quantity),
+        "entry_price": float(trade.entry_price),
+        "exit_price": float(trade.exit_price),
+        "entry_date": trade.entry_date.isoformat(),
+        "end_date": trade.end_date.isoformat(),
+        "realized_pnl": float(trade.realized_pnl),
+        "realized_pnl_pct": float(trade.realized_pnl_pct),
+        "leverage": float(trade.leverage or 1.0),
     }
