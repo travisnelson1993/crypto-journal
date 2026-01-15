@@ -63,3 +63,63 @@ async def performance_summary(db: AsyncSession = Depends(get_db)):
         "largest_rr_win": f(row.largest_rr_win),
     }
 
+# =================================================
+# RISK & DISCIPLINE ANALYTICS (PROCESS)
+# =================================================
+@router.get("/risk-discipline")
+async def risk_discipline_summary(db: AsyncSession = Depends(get_db)):
+    """
+    Trading discipline & risk hygiene metrics.
+    Focus: PROCESS, not results.
+    """
+
+    total_closed = func.count().label("total_closed")
+
+    missing_stop = func.sum(
+        case((Trade.stop_loss.is_(None), 1), else_=0)
+    ).label("missing_stop_loss")
+
+    has_stop = func.sum(
+        case((Trade.stop_loss.isnot(None), 1), else_=0)
+    ).label("has_stop_loss")
+
+    stmt = (
+        select(
+            total_closed,
+            missing_stop,
+            has_stop,
+        )
+        .where(Trade.end_date.isnot(None))
+    )
+
+    row = (await db.execute(stmt)).one()
+
+    total = row.total_closed or 0
+    missing = row.missing_stop_loss or 0
+    has = row.has_stop_loss or 0
+
+    percent_with_stop = (has / total * 100) if total > 0 else 0.0
+    percent_missing_stop = (missing / total * 100) if total > 0 else 0.0
+
+    missing_stmt = (
+        select(Trade.id, Trade.ticker)
+        .where(
+            Trade.end_date.isnot(None),
+            Trade.stop_loss.is_(None),
+        )
+        .order_by(Trade.end_date.desc())
+        .limit(50)
+    )
+
+    missing_rows = (await db.execute(missing_stmt)).all()
+
+    return {
+        "total_closed_trades": total,
+        "trades_with_stop_loss": has,
+        "trades_missing_stop_loss": missing,
+        "percent_with_stop_loss": round(percent_with_stop, 2),
+        "percent_missing_stop_loss": round(percent_missing_stop, 2),
+        "missing_stop_loss_trades": [
+            {"id": r.id, "ticker": r.ticker} for r in missing_rows
+        ],
+    }
