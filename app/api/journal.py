@@ -10,12 +10,15 @@ from app.models.trade import Trade
 router = APIRouter(prefix="/api/journal", tags=["journal"])
 
 
+# =================================================
+# JOURNAL ROWS (ONE ROW PER CLOSED POSITION)
+# =================================================
 @router.get("")
 async def journal_rows(db: AsyncSession = Depends(get_db)):
     """
     One row per CLOSED trade (journal-style).
-    Matches:
-    STATUS | PNL (%) | LEV PNL (%) | RISK-REWARD
+
+    Filters out CLOSE-only execution rows.
     """
 
     status_expr = case(
@@ -30,6 +33,7 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
         func.abs(Trade.entry_price - Trade.stop_loss)
         * Trade.original_quantity
     )
+
     rr_expr = Trade.realized_pnl / func.nullif(risk_usd_expr, 0)
 
     stmt = (
@@ -44,7 +48,10 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
             lev_pnl_pct_expr.label("lev_pnl_pct"),
             rr_expr.label("risk_reward"),
         )
-        .where(Trade.end_date.isnot(None))
+        .where(
+            Trade.end_date.isnot(None),
+            Trade.entry_price.isnot(None),   # 🔑 CRITICAL FIX
+        )
         .order_by(Trade.end_date.desc())
     )
 
@@ -69,6 +76,9 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
     ]
 
 
+# =================================================
+# MONTHLY PERFORMANCE SUMMARY
+# =================================================
 @router.get("/monthly")
 async def journal_monthly(db: AsyncSession = Depends(get_db)):
     """
@@ -88,6 +98,7 @@ async def journal_monthly(db: AsyncSession = Depends(get_db)):
         func.abs(Trade.entry_price - Trade.stop_loss)
         * Trade.original_quantity
     )
+
     rr = Trade.realized_pnl / func.nullif(risk_usd, 0)
 
     stmt = (
@@ -107,7 +118,10 @@ async def journal_monthly(db: AsyncSession = Depends(get_db)):
             (func.max(lev_pnl_pct) * 100).label("largest_lev_pct"),
             func.max(rr).label("largest_rr_win"),
         )
-        .where(Trade.end_date.isnot(None))
+        .where(
+            Trade.end_date.isnot(None),
+            Trade.entry_price.isnot(None),   # 🔑 SAME FIX
+        )
         .group_by(month)
         .order_by(month.desc())
     )
