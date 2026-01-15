@@ -125,3 +125,45 @@ async def close_trade_endpoint(
         "realized_pnl_pct": float(trade.realized_pnl_pct),
         "leverage": float(trade.leverage or 1.0),
     }
+
+# -------------------------------------------------
+# Stop-loss update (risk definition)
+# -------------------------------------------------
+class UpdateStopLossRequest(BaseModel):
+    stop_loss: Decimal = Field(..., gt=Decimal("0"))
+
+
+@router.patch("/{trade_id}/stop-loss")
+async def update_stop_loss(
+    trade_id: int,
+    payload: UpdateStopLossRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update stop-loss for a trade.
+
+    Notes:
+    - Allowed for OPEN or CLOSED trades
+    - Does NOT modify PnL
+    - RR updates automatically via analytics queries
+    """
+
+    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    trade = result.scalar_one_or_none()
+
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    trade.stop_loss = payload.stop_loss
+
+    await db.commit()
+    await db.refresh(trade)
+
+    return {
+        "id": trade.id,
+        "ticker": trade.ticker,
+        "direction": trade.direction,
+        "entry_price": float(trade.entry_price),
+        "stop_loss": float(trade.stop_loss),
+        "status": "CLOSED" if trade.end_date else "OPEN",
+    }
