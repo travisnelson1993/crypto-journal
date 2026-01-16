@@ -856,3 +856,39 @@ async def equity_regime(
             else "Reduce position size"
         ),
     }
+
+
+# =================================================
+# POSITION SIZING AUTHORIZATION (REGIME-BASED)
+# =================================================
+@router.get("/position-sizing")
+async def position_sizing(
+    db: AsyncSession = Depends(get_db),
+    base_risk_pct: float = 0.01,
+):
+    # --- Reuse equity regime ---
+    regime_data = await equity_regime(db=db)
+
+    regime = regime_data["regime"]
+    trading_halted = regime_data["trading_halted"]
+
+    if regime == "risk_on":
+        multiplier = 1.0
+        notes = "Full risk allowed"
+    elif regime == "risk_reduced":
+        multiplier = 0.25
+        notes = "Reduced risk mode"
+    else:
+        multiplier = 0.0
+        notes = "Trading halted by risk engine"
+
+    allowed_risk_pct = base_risk_pct * multiplier
+
+    return {
+        "regime": regime,
+        "base_risk_pct": round(base_risk_pct, 4),
+        "allowed_risk_pct": round(allowed_risk_pct, 4),
+        "risk_multiplier": multiplier,
+        "trading_allowed": not trading_halted,
+        "notes": notes,
+    }
