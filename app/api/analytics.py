@@ -382,3 +382,299 @@ async def discipline_score_v2_eligible_rolling(
         "trades_evaluated": trades,
         "discipline_score": round(score, 2),
     }
+
+
+# =================================================
+# DISCIPLINE SCORE v2 — TREND (ELIGIBLE TRADES ONLY)
+# =================================================
+@router.get("/discipline-score/v2/eligible/trend")
+async def discipline_score_v2_trend(
+    db: AsyncSession = Depends(get_db),
+    window: int = 20,
+    limit: int = 100,
+    max_risk_pct: float = 0.01,
+    max_leverage: float = 10.0,
+):
+    # Base eligibility filter
+    base_filter = [
+        Trade.end_date.isnot(None),
+        Trade.stop_loss.isnot(None),
+        Trade.account_equity_at_entry.isnot(None),
+        Trade.risk_pct_at_entry.isnot(None),
+    ]
+
+    eligible_stmt = (
+        select(Trade.id, Trade.end_date)
+        .where(*base_filter)
+        .order_by(Trade.end_date.asc(), Trade.id.asc())
+        .limit(limit)
+    )
+
+    eligible = (await db.execute(eligible_stmt)).all()
+
+    points = []
+
+    for idx, (trade_id, end_date) in enumerate(eligible):
+        if idx + 1 < window:
+            continue
+
+        window_ids = [
+            t[0] for t in eligible[idx + 1 - window : idx + 1]
+        ]
+
+        stop_defined = case((Trade.stop_loss.isnot(None), 1), else_=0)
+        equity_snapshot_present = case((Trade.account_equity_at_entry.isnot(None), 1), else_=0)
+
+        risk_within_limit = case(
+            (
+                and_(
+                    Trade.risk_pct_at_entry.isnot(None),
+                    Trade.risk_pct_at_entry <= max_risk_pct,
+                ),
+                1,
+            ),
+            else_=0,
+        )
+
+        leverage_within_limit = case(
+            (func.coalesce(Trade.leverage, 1) <= max_leverage, 1),
+            else_=0,
+        )
+
+        stmt = (
+            select(
+                func.avg(stop_defined).label("stop_rate"),
+                func.avg(equity_snapshot_present).label("equity_rate"),
+                func.avg(risk_within_limit).label("risk_rate"),
+                func.avg(leverage_within_limit).label("leverage_rate"),
+            )
+            .where(Trade.id.in_(window_ids))
+        )
+
+        row = (await db.execute(stmt)).one()
+
+        score = (
+            float(row.stop_rate or 0) * 0.30
+            + float(row.equity_rate or 0) * 0.20
+            + float(row.risk_rate or 0) * 0.30
+            + float(row.leverage_rate or 0) * 0.20
+        ) * 100
+
+        points.append({
+            "trade_id": trade_id,
+            "end_date": end_date.isoformat(),
+            "discipline_score": round(score, 2),
+            "trades_in_window": window,
+        })
+
+    return {
+        "window": window,
+        "points": points,
+    }
+
+
+# =================================================
+# DISCIPLINE SCORE v2 — RULE VIOLATIONS (PER TRADE)
+# =================================================
+@router.get("/discipline-score/v2/violations")
+async def discipline_rule_violations(
+    db: AsyncSession = Depends(get_db),
+    limit: int = 100,
+    max_risk_pct: float = 0.01,
+    max_leverage: float = 10.0,
+):
+    stmt = (
+        select(Trade)
+        .where(Trade.end_date.isnot(None))
+        .order_by(Trade.end_date.desc(), Trade.id.desc())
+        .limit(limit)
+    )
+
+    trades = (await db.execute(stmt)).scalars().all()
+
+    results = []
+
+    for t in trades:
+        violations = []
+
+        if t.stop_loss is None:
+            violations.append("missing_stop_loss")
+
+        if t.account_equity_at_entry is None:
+            violations.append("missing_equity_snapshot")
+
+        if (
+            t.risk_pct_at_entry is not None
+            and t.risk_pct_at_entry > max_risk_pct
+        ):
+            violations.append("risk_exceeded")
+
+        if (
+            t.leverage is not None
+            and t.leverage > max_leverage
+        ):
+            violations.append("leverage_exceeded")
+
+        eligible = (
+            t.stop_loss is not None
+            and t.account_equity_at_entry is not None
+            and t.risk_pct_at_entry is not None
+        )
+
+        results.append({
+            "trade_id": t.id,
+            "end_date": t.end_date.isoformat() if t.end_date else None,
+            "eligible": eligible,
+            "violations": violations,
+        })
+
+    return {
+        "rules": {
+            "stop_loss_defined": True,
+            "equity_snapshot_present": True,
+            "risk_within_limit": True,
+            "leverage_within_limit": True,
+        },
+        "trades": results,
+    }
+
+
+# =================================================
+# EQUITY CURVE & DRAWDOWN (SNAPSHOT-BASED)
+# =================================================
+@router.get("/equity-curve")
+async def equity_curve_and_drawdown(
+    db: AsyncSession = Depends(get_db),
+    limit: int = 200,
+    eligible_only: bool = True,
+):
+    filters = [
+        Trade.end_date.isnot(None),
+        Trade.account_equity_at_entry.isnot(None),
+    ]
+
+    if eligible_only:
+        filters.extend([
+            Trade.stop_loss.isnot(None),
+            Trade.risk_pct_at_entry.isnot(None),
+        ])
+
+    stmt = (
+        select(
+            Trade.id,
+            Trade.end_date,
+            Trade.account_equity_at_entry,
+        )
+        .where(*filters)
+        .order_by(Trade.end_date.asc(), Trade.id.asc())
+        .limit(limit)
+    )
+
+    rows = (await db.execute(stmt)).all()
+
+    points = []
+    peak_equity = None
+
+    max_dd_pct = 0.0
+    max_dd_usd = 0.0
+    dd_start = None
+    dd_end = None
+    peak_at_dd_start = None
+
+    for trade_id, end_date, equity in rows:
+        equity = float(equity)
+
+        if peak_equity is None or equity > peak_equity:
+            peak_equity = equity
+            peak_at_dd_start = equity
+
+        drawdown_pct = (equity - peak_equity) / peak_equity * 100
+
+        if drawdown_pct < max_dd_pct:
+            max_dd_pct = drawdown_pct
+            max_dd_usd = equity - peak_equity
+            dd_start = peak_at_dd_start
+            dd_end = end_date
+
+        points.append({
+            "trade_id": trade_id,
+            "end_date": end_date.isoformat(),
+            "equity": round(equity, 2),
+            "peak_equity": round(peak_equity, 2),
+            "drawdown_pct": round(drawdown_pct, 2),
+        })
+
+    return {
+        "max_drawdown_pct": round(max_dd_pct, 2),
+        "max_drawdown_usd": round(max_dd_usd, 2),
+        "points": points,
+    }
+
+
+# =================================================
+# EQUITY CURVE + DRAWDOWN (SNAPSHOT-ANCHORED)
+# =================================================
+@router.get("/equity-curve")
+async def equity_curve(
+    db: AsyncSession = Depends(get_db),
+    eligible_only: bool = True,
+):
+    ...
+
+
+# =================================================
+# LOSS STREAK DETECTION (PSYCHOLOGICAL RISK)
+# =================================================
+@router.get("/loss-streaks")
+async def loss_streaks(
+    db: AsyncSession = Depends(get_db),
+    eligible_only: bool = False,
+    max_losses: int = 3,
+):
+    stmt = (
+        select(
+            Trade.id,
+            Trade.end_date,
+            Trade.realized_pnl,
+        )
+        .where(Trade.end_date.isnot(None))
+        .order_by(Trade.end_date.asc(), Trade.id.asc())
+    )
+
+    if eligible_only:
+        stmt = stmt.where(
+            Trade.stop_loss.isnot(None),
+            Trade.account_equity_at_entry.isnot(None),
+        )
+
+    rows = (await db.execute(stmt)).all()
+
+    current_streak = 0
+    max_streak_seen = 0
+    recent_losses = []
+
+    for trade_id, end_date, pnl in rows:
+        if pnl is None or pnl >= 0:
+            current_streak = 0
+            recent_losses.clear()
+            continue
+
+        # loss
+        current_streak += 1
+        max_streak_seen = max(max_streak_seen, current_streak)
+
+        recent_losses.append({
+            "trade_id": trade_id,
+            "end_date": end_date.isoformat(),
+            "realized_pnl": float(pnl),
+        })
+
+    trading_halted = current_streak >= max_losses
+
+    return {
+        "current_loss_streak": current_streak,
+        "max_loss_streak": max_streak_seen,
+        "trading_halted": trading_halted,
+        "halt_rule": f"max {max_losses} consecutive losses",
+        "recent_losses": recent_losses[-max_losses:],
+    }
