@@ -4,6 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
 from app.models.trade import Trade
+from app.services.analytics.loss_streaks import compute_loss_streaks
+from app.services.analytics.daily_max_loss import compute_daily_max_loss
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -649,53 +651,11 @@ async def loss_streaks(
     eligible_only: bool = False,
     max_losses: int = 3,
 ):
-    stmt = (
-        select(
-            Trade.id,
-            Trade.end_date,
-            Trade.realized_pnl,
-        )
-        .where(Trade.end_date.isnot(None))
-        .order_by(Trade.end_date.asc(), Trade.id.asc())
+    return await compute_loss_streaks(
+        db,
+        eligible_only=eligible_only,
+        max_losses=max_losses,
     )
-
-    if eligible_only:
-        stmt = stmt.where(
-            Trade.stop_loss.isnot(None),
-            Trade.account_equity_at_entry.isnot(None),
-        )
-
-    rows = (await db.execute(stmt)).all()
-
-    current_streak = 0
-    max_streak_seen = 0
-    recent_losses = []
-
-    for trade_id, end_date, pnl in rows:
-        if pnl is None or pnl >= 0:
-            current_streak = 0
-            recent_losses.clear()
-            continue
-
-        # loss
-        current_streak += 1
-        max_streak_seen = max(max_streak_seen, current_streak)
-
-        recent_losses.append({
-            "trade_id": trade_id,
-            "end_date": end_date.isoformat(),
-            "realized_pnl": float(pnl),
-        })
-
-    trading_halted = current_streak >= max_losses
-
-    return {
-        "current_loss_streak": current_streak,
-        "max_loss_streak": max_streak_seen,
-        "trading_halted": trading_halted,
-        "halt_rule": f"max {max_losses} consecutive losses",
-        "recent_losses": recent_losses[-max_losses:],
-    }
 
 
 # =================================================
@@ -707,59 +667,11 @@ async def daily_max_loss(
     max_daily_loss_usd: float = 100.0,
     eligible_only: bool = False,
 ):
-    from datetime import datetime
-
-    today = datetime.utcnow().date()
-
-    stmt = (
-        select(
-            Trade.id,
-            Trade.end_date,
-            Trade.realized_pnl,
-        )
-        .where(
-            Trade.end_date.isnot(None),
-            func.date(Trade.end_date) == today,
-        )
-        .order_by(Trade.end_date.asc(), Trade.id.asc())
+    return await compute_daily_max_loss(
+        db,
+        max_daily_loss_usd=max_daily_loss_usd,
+        eligible_only=eligible_only,
     )
-
-    if eligible_only:
-        stmt = stmt.where(
-            Trade.stop_loss.isnot(None),
-            Trade.account_equity_at_entry.isnot(None),
-        )
-
-    rows = (await db.execute(stmt)).all()
-
-    trades = []
-    daily_pnl = 0.0
-
-    for trade_id, end_date, pnl in rows:
-        if pnl is None:
-            continue
-
-        pnl_f = float(pnl)
-        daily_pnl += pnl_f
-
-        trades.append({
-            "trade_id": trade_id,
-            "end_date": end_date.isoformat(),
-            "realized_pnl": pnl_f,
-        })
-
-    trading_halted = daily_pnl <= -abs(max_daily_loss_usd)
-
-    return {
-        "date": today.isoformat(),
-        "daily_pnl": round(daily_pnl, 2),
-        "max_daily_loss_usd": round(max_daily_loss_usd, 2),
-        "trading_halted": trading_halted,
-        "halt_reason": (
-            "Daily loss limit exceeded" if trading_halted else None
-        ),
-        "trades": trades,
-    }
 
 
 # =================================================
