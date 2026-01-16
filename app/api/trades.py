@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/trades", tags=["trades"])
 async def trade_lifecycle(db: AsyncSession = Depends(get_db)):
     """
     One row per trade (execution lifecycle view).
-    This is an audit-style endpoint, not used for analytics.
+    Audit-style endpoint. No analytics logic here.
     """
 
     stmt = select(Trade).order_by(Trade.entry_date.asc())
@@ -34,39 +34,31 @@ async def trade_lifecycle(db: AsyncSession = Depends(get_db)):
     rows = []
 
     for t in trades:
-        # ---------- STATUS ----------
         if t.end_date is None:
-            if t.original_quantity > t.quantity:
-                status = "PARTIAL"
-            else:
-                status = "OPEN"
+            status = "PARTIAL" if t.original_quantity > t.quantity else "OPEN"
         else:
             status = "CLOSED"
 
-        # ---------- PNL ----------
         pnl_pct = t.realized_pnl_pct
-        lev_pnl_pct = (
-            pnl_pct * t.leverage
-            if pnl_pct is not None and t.leverage is not None
-            else None
-        )
+        lev = Decimal(str(t.leverage)) if t.leverage is not None else Decimal("1")
+        lev_pnl_pct = pnl_pct * lev if pnl_pct is not None else None
 
         rows.append(
             {
                 "id": t.id,
                 "ticker": t.ticker,
                 "direction": t.direction,
-                "entry_price": float(t.entry_price) if t.entry_price else None,
+                "entry_price": float(t.entry_price),
                 "exit_price": float(t.exit_price) if t.exit_price else None,
-                "entry_date": t.entry_date.isoformat() if t.entry_date else None,
+                "entry_date": t.entry_date.isoformat(),
                 "end_date": t.end_date.isoformat() if t.end_date else None,
                 "original_quantity": float(t.original_quantity),
                 "quantity": float(t.quantity),
-                "leverage": float(t.leverage) if t.leverage else 1.0,
+                "leverage": float(lev),
                 "status": status,
                 "pnl_pct": float(pnl_pct) if pnl_pct is not None else None,
                 "lev_pnl_pct": float(lev_pnl_pct) if lev_pnl_pct is not None else None,
-                "risk_reward": None,  # computed in journal
+                "risk_reward": None,
             }
         )
 
@@ -74,7 +66,7 @@ async def trade_lifecycle(db: AsyncSession = Depends(get_db)):
 
 
 # -------------------------------------------------
-# Trade close (mutation endpoint)
+# Trade close
 # -------------------------------------------------
 class CloseTradeRequest(BaseModel):
     exit_price: Decimal = Field(..., gt=Decimal("0"))
@@ -88,11 +80,6 @@ async def close_trade_endpoint(
     payload: CloseTradeRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Close a trade and compute realized PnL immediately.
-    This is the ONLY place realized PnL is written.
-    """
-
     result = await db.execute(select(Trade).where(Trade.id == trade_id))
     trade = result.scalar_one_or_none()
 
@@ -115,19 +102,13 @@ async def close_trade_endpoint(
     return {
         "id": trade.id,
         "ticker": trade.ticker,
-        "direction": trade.direction,
-        "original_quantity": float(trade.original_quantity),
-        "entry_price": float(trade.entry_price),
-        "exit_price": float(trade.exit_price),
-        "entry_date": trade.entry_date.isoformat(),
-        "end_date": trade.end_date.isoformat(),
         "realized_pnl": float(trade.realized_pnl),
         "realized_pnl_pct": float(trade.realized_pnl_pct),
-        "leverage": float(trade.leverage or 1.0),
     }
 
+
 # -------------------------------------------------
-# Stop-loss update (risk definition)
+# Stop-loss update
 # -------------------------------------------------
 class UpdateStopLossRequest(BaseModel):
     stop_loss: Decimal = Field(..., gt=Decimal("0"))
@@ -139,13 +120,39 @@ async def update_stop_loss(
     payload: UpdateStopLossRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Update stop-loss for a trade.
+    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    trade = result.scalar_one_or_none()
 
-    Notes:
-    - Allowed for OPEN or CLOSED trades
-    - Does NOT modify PnL
-    - RR updates automatically via analytics queries
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    trade.stop_loss = payload.stop_loss
+    await db.commit()
+    await db.refresh(trade)
+
+    return {
+        "id": trade.id,
+        "ticker": trade.ticker,
+        "stop_loss": float(trade.stop_loss),
+    }
+
+
+# -------------------------------------------------
+# Step 1.5 — Equity Snapshot (PATCH, immutable)
+# -------------------------------------------------
+class EquitySnapshotIn(BaseModel):
+    account_equity_at_entry: Decimal = Field(..., gt=Decimal("0"))
+    risk_usd_at_entry: Optional[Decimal] = Field(default=None, gt=Decimal("0"))
+
+
+@router.patch("/{trade_id}/equity-snapshot")
+async def set_equity_snapshot(
+    trade_id: int,
+    payload: EquitySnapshotIn,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Immutable equity snapshot at trade entry.
     """
 
     result = await db.execute(select(Trade).where(Trade.id == trade_id))
@@ -154,7 +161,25 @@ async def update_stop_loss(
     if not trade:
         raise HTTPException(status_code=404, detail="Trade not found")
 
-    trade.stop_loss = payload.stop_loss
+    if trade.account_equity_at_entry is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Equity snapshot already set for this trade",
+        )
+
+    equity = payload.account_equity_at_entry
+    trade.account_equity_at_entry = equity
+
+    risk_usd = payload.risk_usd_at_entry
+
+    if risk_usd is None and trade.stop_loss is not None:
+        risk_per_unit = (trade.entry_price - trade.stop_loss).copy_abs()
+        risk_usd = risk_per_unit * trade.original_quantity
+        if risk_usd == 0:
+            risk_usd = None
+
+    trade.risk_usd_at_entry = risk_usd
+    trade.risk_pct_at_entry = (risk_usd / equity) if risk_usd else None
 
     await db.commit()
     await db.refresh(trade)
@@ -162,8 +187,8 @@ async def update_stop_loss(
     return {
         "id": trade.id,
         "ticker": trade.ticker,
-        "direction": trade.direction,
-        "entry_price": float(trade.entry_price),
-        "stop_loss": float(trade.stop_loss),
-        "status": "CLOSED" if trade.end_date else "OPEN",
+        "account_equity_at_entry": float(trade.account_equity_at_entry),
+        "risk_usd_at_entry": float(trade.risk_usd_at_entry) if trade.risk_usd_at_entry else None,
+        "risk_pct_at_entry": float(trade.risk_pct_at_entry) if trade.risk_pct_at_entry else None,
+        "note": "Equity snapshot stored (immutable)",
     }
