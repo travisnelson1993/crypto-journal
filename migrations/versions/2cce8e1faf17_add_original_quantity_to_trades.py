@@ -17,11 +17,25 @@ depends_on = None
 
 
 def upgrade():
+    # 1. Add column as nullable
     op.add_column(
         "trades",
-        sa.Column("original_quantity", sa.Numeric(18, 8), nullable=False),
+        sa.Column("original_quantity", sa.Numeric(18, 8), nullable=True),
+    )
+
+    # 2. Backfill from quantity
+    op.execute(
+        "UPDATE trades SET original_quantity = quantity WHERE original_quantity IS NULL"
+    )
+
+    # 3. Enforce NOT NULL
+    op.alter_column(
+        "trades",
+        "original_quantity",
+        nullable=False,
     )
 
 
 def downgrade():
     op.drop_column("trades", "original_quantity")
+

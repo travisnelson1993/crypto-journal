@@ -68,12 +68,27 @@ class Trade(Base):
     )
 
     # -------------------------------------------------
-    # Risk & sizing (future analytics)
+    # Risk & sizing (trade-defined)
     # -------------------------------------------------
     stop_loss: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 8), nullable=True
     )
     leverage: Mapped[float] = mapped_column(Float, default=1.0)
+
+    # -------------------------------------------------
+    # Equity snapshot at entry (Step 1.5)
+    # -------------------------------------------------
+    # These fields are IMMUTABLE once set.
+    # They enable true % risk, USD equity curve, and prop-style rules.
+    account_equity_at_entry: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 2), nullable=True
+    )
+    risk_usd_at_entry: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 2), nullable=True
+    )
+    risk_pct_at_entry: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 4), nullable=True
+    )
 
     # -------------------------------------------------
     # Timing
