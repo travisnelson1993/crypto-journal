@@ -543,10 +543,11 @@ async def discipline_rule_violations(
 # EQUITY CURVE & DRAWDOWN (SNAPSHOT-BASED)
 # =================================================
 @router.get("/equity-curve")
-async def equity_curve_and_drawdown(
+async def equity_curve(
     db: AsyncSession = Depends(get_db),
-    limit: int = 200,
     eligible_only: bool = True,
+    sma_window: int = 10,
+    ema_window: int = 5,
 ):
     filters = [
         Trade.end_date.isnot(None),
@@ -567,7 +568,6 @@ async def equity_curve_and_drawdown(
         )
         .where(*filters)
         .order_by(Trade.end_date.asc(), Trade.id.asc())
-        .limit(limit)
     )
 
     rows = (await db.execute(stmt)).all()
@@ -577,24 +577,19 @@ async def equity_curve_and_drawdown(
 
     max_dd_pct = 0.0
     max_dd_usd = 0.0
-    dd_start = None
-    dd_end = None
-    peak_at_dd_start = None
 
+    # ---------- Build equity curve + drawdown ----------
     for trade_id, end_date, equity in rows:
         equity = float(equity)
 
         if peak_equity is None or equity > peak_equity:
             peak_equity = equity
-            peak_at_dd_start = equity
 
         drawdown_pct = (equity - peak_equity) / peak_equity * 100
 
         if drawdown_pct < max_dd_pct:
             max_dd_pct = drawdown_pct
             max_dd_usd = equity - peak_equity
-            dd_start = peak_at_dd_start
-            dd_end = end_date
 
         points.append({
             "trade_id": trade_id,
@@ -604,22 +599,45 @@ async def equity_curve_and_drawdown(
             "drawdown_pct": round(drawdown_pct, 2),
         })
 
+    # ---------- Equity curve smoothing (SMA + EMA) ----------
+    def compute_sma(values, window):
+        sma = []
+        for i in range(len(values)):
+            if i + 1 < window:
+                sma.append(None)
+            else:
+                sma.append(sum(values[i + 1 - window : i + 1]) / window)
+        return sma
+
+    def compute_ema(values, window):
+        ema = []
+        k = 2 / (window + 1)
+        prev = None
+
+        for v in values:
+            if prev is None:
+                prev = v
+            else:
+                prev = v * k + prev * (1 - k)
+            ema.append(prev)
+
+        return ema
+
+    equity_values = [p["equity"] for p in points]
+
+    sma_vals = compute_sma(equity_values, sma_window)
+    ema_vals = compute_ema(equity_values, ema_window)
+
+    for i, p in enumerate(points):
+        p["sma"] = round(sma_vals[i], 2) if sma_vals[i] is not None else None
+        p["ema"] = round(ema_vals[i], 2)
+
+    # ---------- FINAL RETURN (outside loops) ----------
     return {
         "max_drawdown_pct": round(max_dd_pct, 2),
         "max_drawdown_usd": round(max_dd_usd, 2),
         "points": points,
     }
-
-
-# =================================================
-# EQUITY CURVE + DRAWDOWN (SNAPSHOT-ANCHORED)
-# =================================================
-@router.get("/equity-curve")
-async def equity_curve(
-    db: AsyncSession = Depends(get_db),
-    eligible_only: bool = True,
-):
-    ...
 
 
 # =================================================
@@ -677,4 +695,68 @@ async def loss_streaks(
         "trading_halted": trading_halted,
         "halt_rule": f"max {max_losses} consecutive losses",
         "recent_losses": recent_losses[-max_losses:],
+    }
+
+
+# =================================================
+# DAILY MAX LOSS RULE (ACCOUNT PROTECTION)
+# =================================================
+@router.get("/daily-max-loss")
+async def daily_max_loss(
+    db: AsyncSession = Depends(get_db),
+    max_daily_loss_usd: float = 100.0,
+    eligible_only: bool = False,
+):
+    from datetime import datetime
+
+    today = datetime.utcnow().date()
+
+    stmt = (
+        select(
+            Trade.id,
+            Trade.end_date,
+            Trade.realized_pnl,
+        )
+        .where(
+            Trade.end_date.isnot(None),
+            func.date(Trade.end_date) == today,
+        )
+        .order_by(Trade.end_date.asc(), Trade.id.asc())
+    )
+
+    if eligible_only:
+        stmt = stmt.where(
+            Trade.stop_loss.isnot(None),
+            Trade.account_equity_at_entry.isnot(None),
+        )
+
+    rows = (await db.execute(stmt)).all()
+
+    trades = []
+    daily_pnl = 0.0
+
+    for trade_id, end_date, pnl in rows:
+        if pnl is None:
+            continue
+
+        pnl_f = float(pnl)
+        daily_pnl += pnl_f
+
+        trades.append({
+            "trade_id": trade_id,
+            "end_date": end_date.isoformat(),
+            "realized_pnl": pnl_f,
+        })
+
+    trading_halted = daily_pnl <= -abs(max_daily_loss_usd)
+
+    return {
+        "date": today.isoformat(),
+        "daily_pnl": round(daily_pnl, 2),
+        "max_daily_loss_usd": round(max_daily_loss_usd, 2),
+        "trading_halted": trading_halted,
+        "halt_reason": (
+            "Daily loss limit exceeded" if trading_halted else None
+        ),
+        "trades": trades,
     }
