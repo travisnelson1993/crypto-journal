@@ -760,3 +760,99 @@ async def daily_max_loss(
         ),
         "trades": trades,
     }
+
+
+# =================================================
+# EQUITY REGIME & TRADING HALT (DECISION ENGINE)
+# =================================================
+@router.get("/equity-regime")
+async def equity_regime(
+    db: AsyncSession = Depends(get_db),
+    max_drawdown_pct: float = -5.0,
+    max_losses: int = 3,
+    max_daily_loss_usd: float = 100.0,
+    ema_window: int = 5,
+):
+    """
+    Determines trading regime and halt status based on equity, drawdown,
+    loss streaks, and daily loss limits.
+    """
+
+    # ---------- Equity curve ----------
+    eq = await equity_curve(
+        db=db,
+        eligible_only=True,
+        sma_window=ema_window,
+        ema_window=ema_window,
+    )
+
+    points = eq["points"]
+    if not points:
+        return {
+            "regime": "unknown",
+            "trading_halted": True,
+            "reason": "No equity data available",
+        }
+
+    latest = points[-1]
+    equity = latest["equity"]
+    ema = latest["ema"]
+    drawdown = latest["drawdown_pct"]
+
+    # ---------- Loss streak ----------
+    streak = await loss_streaks(
+        db=db,
+        eligible_only=True,
+        max_losses=max_losses,
+    )
+
+    # ---------- Daily max loss ----------
+    daily = await daily_max_loss(
+        db=db,
+        eligible_only=True,
+        max_daily_loss_usd=max_daily_loss_usd,
+    )
+
+    # ---------- Decision logic ----------
+    halted = False
+    reasons = []
+
+    if streak["trading_halted"]:
+        halted = True
+        reasons.append("Max loss streak reached")
+
+    if daily["trading_halted"]:
+        halted = True
+        reasons.append("Daily max loss exceeded")
+
+    if drawdown <= max_drawdown_pct:
+        halted = True
+        reasons.append("Max drawdown exceeded")
+
+    if halted:
+        return {
+            "regime": "halted",
+            "trading_halted": True,
+            "reasons": reasons,
+            "equity": equity,
+            "ema": ema,
+            "drawdown_pct": drawdown,
+        }
+
+    # ---------- Risk mode ----------
+    if equity >= ema:
+        regime = "risk_on"
+    else:
+        regime = "risk_reduced"
+
+    return {
+        "regime": regime,
+        "trading_halted": False,
+        "equity": equity,
+        "ema": ema,
+        "drawdown_pct": drawdown,
+        "notes": (
+            "Trade normally" if regime == "risk_on"
+            else "Reduce position size"
+        ),
+    }
