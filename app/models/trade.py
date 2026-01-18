@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Optional
 
 from sqlalchemy import (
     Boolean,
@@ -10,6 +11,8 @@ from sqlalchemy import (
     Numeric,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -35,7 +38,7 @@ class Trade(Base):
         Numeric(18, 8), nullable=False
     )
 
-    # ✅ ORIGINAL position size (never changes)
+    # ORIGINAL position size (never changes)
     original_quantity: Mapped[Decimal] = mapped_column(
         Numeric(18, 8), nullable=False
     )
@@ -46,7 +49,7 @@ class Trade(Base):
     entry_price: Mapped[Decimal] = mapped_column(
         Numeric(18, 8), nullable=False
     )
-    exit_price: Mapped[Decimal | None] = mapped_column(
+    exit_price: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 8), nullable=True
     )
 
@@ -60,33 +63,31 @@ class Trade(Base):
     # -------------------------------------------------
     # REALIZED PERFORMANCE (locked on close)
     # -------------------------------------------------
-    realized_pnl: Mapped[Decimal | None] = mapped_column(
+    realized_pnl: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 8), nullable=True
     )
-    realized_pnl_pct: Mapped[Decimal | None] = mapped_column(
+    realized_pnl_pct: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 8), nullable=True
     )
 
     # -------------------------------------------------
     # Risk & sizing (trade-defined)
     # -------------------------------------------------
-    stop_loss: Mapped[Decimal | None] = mapped_column(
+    stop_loss: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 8), nullable=True
     )
     leverage: Mapped[float] = mapped_column(Float, default=1.0)
 
     # -------------------------------------------------
-    # Equity snapshot at entry (Step 1.5)
+    # Equity snapshot at entry (IMMUTABLE)
     # -------------------------------------------------
-    # These fields are IMMUTABLE once set.
-    # They enable true % risk, USD equity curve, and prop-style rules.
-    account_equity_at_entry: Mapped[Decimal | None] = mapped_column(
+    account_equity_at_entry: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 2), nullable=True
     )
-    risk_usd_at_entry: Mapped[Decimal | None] = mapped_column(
+    risk_usd_at_entry: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 2), nullable=True
     )
-    risk_pct_at_entry: Mapped[Decimal | None] = mapped_column(
+    risk_pct_at_entry: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(10, 4), nullable=True
     )
 
@@ -96,20 +97,35 @@ class Trade(Base):
     entry_date: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
-    end_date: Mapped[datetime | None] = mapped_column(
+    end_date: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
     # -------------------------------------------------
     # Metadata
     # -------------------------------------------------
-    entry_summary: Mapped[str | None] = mapped_column(
+    entry_summary: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
     )
     orphan_close: Mapped[bool] = mapped_column(Boolean, default=False)
-    source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    # -------------------------------------------------
+    # Risk engine advisory (SOFT warnings only)
+    # -------------------------------------------------
+    risk_warnings: Mapped[Optional[dict]] = mapped_column(
+        MutableDict.as_mutable(JSONB),
+        nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
     )
+
+    # -------------------------------------------------
+    # Quality-of-life helpers
+    # -------------------------------------------------
+    @property
+    def has_risk_warnings(self) -> bool:
+        return bool(self.risk_warnings)
