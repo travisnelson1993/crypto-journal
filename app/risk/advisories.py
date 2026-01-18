@@ -1,6 +1,11 @@
 from typing import Optional, Dict, Any
-from app.models.trade import Trade
 
+from app.models.trade import Trade
+from app.risk.warning_codes import (
+    EXPOSURE_HIGH,
+    RISK_PCT_HIGH,
+    WARNING_CATEGORIES,
+)
 
 # =================================================
 # CORE ADVISORY ENGINE (CANONICAL ENTRYPOINT)
@@ -37,7 +42,9 @@ def build_stop_based_risk_warning(trade: Trade) -> Optional[Dict[str, Any]]:
         return None
 
     return {
-        "RISK_PCT_HIGH": {
+        RISK_PCT_HIGH: {
+            "code": RISK_PCT_HIGH,
+            "category": WARNING_CATEGORIES[RISK_PCT_HIGH],
             "severity": "critical" if risk_pct >= 0.05 else "warning",
             "rule": "max_risk_pct",
             "allowed_pct": 0.02,
@@ -65,7 +72,9 @@ def build_exposure_based_warning(trade: Trade) -> Optional[Dict[str, Any]]:
         return None
 
     return {
-        "EXPOSURE_HIGH": {
+        EXPOSURE_HIGH: {
+            "code": EXPOSURE_HIGH,
+            "category": WARNING_CATEGORIES[EXPOSURE_HIGH],
             "severity": "critical" if exposure_pct >= 0.25 else "warning",
             "rule": "max_exposure_pct",
             "allowed_pct": 0.10,
