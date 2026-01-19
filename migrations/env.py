@@ -1,28 +1,36 @@
 ﻿import os
+import sys
 from logging.config import fileConfig
+
+# ✅ Ensure project root is on PYTHONPATH for Alembic
+sys.path.append(os.getcwd())
 
 from alembic import context
 from sqlalchemy import create_engine, pool
 
+# Alembic Config object
 config = context.config
 
+# Interpret the config file for Python logging.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Import metadata only
+# Import metadata only (no side effects)
 from app.db.database import Base
 
 target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
-    # Prefer DATABASE_URL (CI), fallback to CRYPTO_JOURNAL_DSN (local).
+    """
+    Prefer DATABASE_URL (CI), fallback to CRYPTO_JOURNAL_DSN (local).
+    Ensure Alembic uses a synchronous driver.
+    """
     url = os.getenv("DATABASE_URL") or os.getenv("CRYPTO_JOURNAL_DSN")
     if not url:
         raise RuntimeError("DATABASE_URL or CRYPTO_JOURNAL_DSN must be set")
 
-    # Alembic MUST use a sync driver.
-    # If app uses asyncpg, convert to a sync psycopg2-style URL.
+    # Convert async URL → sync for Alembic
     if url.startswith("postgresql+asyncpg://"):
         url = url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
@@ -52,6 +60,7 @@ def run_migrations_online() -> None:
             target_metadata=target_metadata,
             compare_type=True,
         )
+
         with context.begin_transaction():
             context.run_migrations()
 
