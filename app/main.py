@@ -6,7 +6,7 @@ from app.api import stats as stats_router
 from app.api import trades as trades_router
 from app.api import positions as positions_router
 from app.api.journal import router as journal_router
-from app.api.analytics import router as analytics_router
+from app.api.analytics.risk_warnings import router as risk_warnings_router
 
 app = FastAPI(title="Crypto Journal API")
 
@@ -29,7 +29,9 @@ app.include_router(stats_router.router)
 app.include_router(imports_router.router)
 app.include_router(positions_router.router)
 app.include_router(journal_router)
-app.include_router(analytics_router)
+
+# Analytics (explicit, modular)
+app.include_router(risk_warnings_router)
 
 # -------------------------------------------------
 # Health check (CI / uptime / sanity)

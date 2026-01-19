@@ -1,85 +1,89 @@
-from typing import Optional, Dict, Any
+from typing import Dict, Any, Optional, List
 
 from app.models.trade import Trade
-from app.risk.warning_codes import (
-    EXPOSURE_HIGH,
-    RISK_PCT_HIGH,
-    WARNING_CATEGORIES,
+from app.risk.codes import (
+    EXPOSURE_NO_STOP,
+    MAX_RISK_PCT,
 )
 
-# =================================================
-# CORE ADVISORY ENGINE (CANONICAL ENTRYPOINT)
-# =================================================
-def compute_risk_advisories(trade: Trade) -> Optional[Dict[str, Any]]:
-    warnings: Dict[str, Any] = {}
+ENGINE_EQUITY_SNAPSHOT = "equity_snapshot_v1"
 
-    stop_based = build_stop_based_risk_warning(trade)
-    if stop_based:
-        warnings.update(stop_based)
 
-    exposure_based = build_exposure_based_warning(trade)
-    if exposure_based:
-        warnings.update(exposure_based)
+# =================================================
+# CANONICAL ADVISORY ENGINE (ENTRYPOINT)
+# =================================================
+def compute_risk_advisories(trade: Trade) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    """
+    Returns lifecycle-keyed, append-only risk advisories.
+
+    Final, UI-safe schema:
+    {
+      "equity_snapshot": [ {...}, {...} ],
+      "entry_advisory":  [ {...} ]
+    }
+    """
+
+    warnings: Dict[str, List[Dict[str, Any]]] = {}
+
+    equity_snapshot = build_equity_snapshot_warnings(trade)
+    if equity_snapshot:
+        warnings["equity_snapshot"] = equity_snapshot
 
     return warnings or None
 
 
 # =================================================
-# PRIMARY RULE — Stop-based risk % of account
+# EQUITY SNAPSHOT RULES (IMMUTABLE CONTEXT)
 # =================================================
-def build_stop_based_risk_warning(trade: Trade) -> Optional[Dict[str, Any]]:
-    if (
-        trade.account_equity_at_entry is None
-        or trade.account_equity_at_entry <= 0
-        or trade.stop_loss is None
-        or trade.risk_pct_at_entry is None
-    ):
+def build_equity_snapshot_warnings(trade: Trade) -> Optional[List[Dict[str, Any]]]:
+    if trade.account_equity_at_entry is None or trade.account_equity_at_entry <= 0:
         return None
 
-    risk_pct = float(trade.risk_pct_at_entry)
+    results: List[Dict[str, Any]] = []
 
-    if risk_pct < 0.02:
-        return None
+    # -------------------------------------------------
+    # RULE: Exposure without stop loss (fallback rule)
+    # -------------------------------------------------
+    if trade.stop_loss is None:
+        notional = trade.entry_price * trade.original_quantity
+        exposure_pct = float(notional / trade.account_equity_at_entry)
 
-    return {
-        RISK_PCT_HIGH: {
-            "code": RISK_PCT_HIGH,
-            "category": WARNING_CATEGORIES[RISK_PCT_HIGH],
-            "severity": "critical" if risk_pct >= 0.05 else "warning",
-            "rule": "max_risk_pct",
-            "allowed_pct": 0.02,
-            "actual_pct": round(risk_pct, 4),
-            "message": f"Risk per trade is {risk_pct:.2%} of account",
-        }
-    }
+        if exposure_pct >= 0.10:
+            results.append(
+                {
+                    "code": EXPOSURE_NO_STOP,
+                    "severity": "critical" if exposure_pct >= 0.25 else "warning",
+                    "metric": "exposure_pct",
+                    "allowed": 0.10,
+                    "actual": round(exposure_pct, 4),
+                    "message": (
+                        f"{exposure_pct:.2%} of account committed "
+                        "without a stop loss"
+                    ),
+                    "engine": ENGINE_EQUITY_SNAPSHOT,
+                    "resolved": False,
+                }
+            )
 
+    # -------------------------------------------------
+    # RULE: Stop-based risk % of account
+    # -------------------------------------------------
+    if trade.stop_loss is not None and trade.risk_pct_at_entry is not None:
+        risk_pct = float(trade.risk_pct_at_entry)
 
-# =================================================
-# FALLBACK RULE — Exposure % (ONLY if no stop)
-# =================================================
-def build_exposure_based_warning(trade: Trade) -> Optional[Dict[str, Any]]:
-    if (
-        trade.account_equity_at_entry is None
-        or trade.account_equity_at_entry <= 0
-        or trade.stop_loss is not None
-    ):
-        return None
+        if risk_pct >= 0.02:
+            results.append(
+                {
+                    "code": MAX_RISK_PCT,
+                    "severity": "critical" if risk_pct >= 0.05 else "warning",
+                    "metric": "risk_pct",
+                    "allowed": 0.02,
+                    "actual": round(risk_pct, 4),
+                    "message": f"Risk per trade is {risk_pct:.2%} of account",
+                    "engine": ENGINE_EQUITY_SNAPSHOT,
+                    "resolved": False,
+                }
+            )
 
-    notional = trade.entry_price * trade.original_quantity
-    exposure_pct = float(notional / trade.account_equity_at_entry)
-
-    if exposure_pct < 0.10:
-        return None
-
-    return {
-        EXPOSURE_HIGH: {
-            "code": EXPOSURE_HIGH,
-            "category": WARNING_CATEGORIES[EXPOSURE_HIGH],
-            "severity": "critical" if exposure_pct >= 0.25 else "warning",
-            "rule": "max_exposure_pct",
-            "allowed_pct": 0.10,
-            "actual_pct": round(exposure_pct, 4),
-            "message": f"{exposure_pct:.2%} of account committed without a stop loss",
-        }
-    }
+    return results or None
 
