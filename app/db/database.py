@@ -13,7 +13,7 @@ Base = declarative_base()
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/crypto_journal",
+    "postgresql+asyncpg://postgres:postgres@localhost:55433/crypto_journal",
 )
 
 _engine: AsyncEngine | None = None
@@ -26,6 +26,7 @@ def get_async_engine() -> AsyncEngine:
         _engine = create_async_engine(
             DATABASE_URL,
             pool_pre_ping=True,
+            echo=True,  # 👈 ADD THIS
         )
     return _engine
 
