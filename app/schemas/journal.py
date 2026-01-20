@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from enum import Enum
 from pydantic import BaseModel, Field
+from app.models.journal import TradeNoteType
 
 
 # -------------------------
@@ -50,16 +51,18 @@ class DailyJournalOut(DailyJournalCreate):
 
 
 # -------------------------
-# TRADE NOTES (Phase 2A)
+# TRADE NOTES (Phase 2B)
 # -------------------------
 class TradeNoteCreate(BaseModel):
-    trade_id: int
-    note_type: str  # entry | mid | exit
+    note_type: TradeNoteType
     content: str | None = None
 
 
-class TradeNoteOut(TradeNoteCreate):
+class TradeNoteOut(BaseModel):
     id: int
+    trade_id: int
+    note_type: TradeNoteType
+    content: str | None
     created_at: datetime
 
     class Config:

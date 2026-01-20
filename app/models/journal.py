@@ -1,3 +1,7 @@
+# app/models/journal.py
+
+from app.models.trade import Trade  # noqa: F401  <-- MUST be at top
+
 import enum
 from sqlalchemy import (
     Column,
@@ -34,6 +38,13 @@ class DailyBias(str, enum.Enum):
     bullish = "bullish"
     bearish = "bearish"
     range = "range"
+
+
+# 🔒 Phase 2B — Trade Note Type Enum
+class TradeNoteType(str, enum.Enum):
+    entry = "entry"
+    mid = "mid"
+    exit = "exit"
 
 
 # -------------------------
@@ -77,7 +88,7 @@ class DailyJournalEntry(Base):
 
 
 # -------------------------
-# TRADE NOTES (Phase 2A)
+# TRADE NOTES (Phase 2B)
 # -------------------------
 class TradeNote(Base):
     __tablename__ = "trade_notes"
@@ -85,7 +96,15 @@ class TradeNote(Base):
     id = Column(Integer, primary_key=True)
     trade_id = Column(Integer, ForeignKey("trades.id"), nullable=False)
 
-    note_type = Column(String, nullable=False)  # entry / mid / exit
+    note_type = Column(
+        Enum(
+            TradeNoteType,
+            name="trade_note_type_enum",   # 🔒 DB ENUM (next step)
+            native_enum=True,
+        ),
+        nullable=False,
+    )
+
     content = Column(Text)
 
     created_at = Column(
