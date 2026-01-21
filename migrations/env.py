@@ -2,25 +2,37 @@
 import sys
 from logging.config import fileConfig
 
-# ✅ Ensure project root is on PYTHONPATH for Alembic
+# -------------------------------------------------
+# Ensure project root is on PYTHONPATH
+# -------------------------------------------------
 sys.path.append(os.getcwd())
 
 from alembic import context
 from sqlalchemy import create_engine, pool
 
-# Alembic Config object
+# -------------------------------------------------
+# Alembic Config
+# -------------------------------------------------
 config = context.config
 
-# Interpret the config file for Python logging.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Import metadata only (no side effects)
+# -------------------------------------------------
+# 🔒 CRITICAL: Load ALL models before metadata
+# -------------------------------------------------
 from app.db.database import Base
+import app.models  # ✅ REQUIRED — forces model registration
 
 target_metadata = Base.metadata
 
+print(">>> METADATA TABLES LOADED BY ALEMBIC:")
+for table in Base.metadata.tables:
+    print("   -", table)
 
+# -------------------------------------------------
+# Database URL helper
+# -------------------------------------------------
 def get_database_url() -> str:
     """
     Prefer DATABASE_URL (CI), fallback to CRYPTO_JOURNAL_DSN (local).
@@ -36,7 +48,9 @@ def get_database_url() -> str:
 
     return url
 
-
+# -------------------------------------------------
+# Offline migrations
+# -------------------------------------------------
 def run_migrations_offline() -> None:
     url = get_database_url()
     context.configure(
@@ -49,7 +63,9 @@ def run_migrations_offline() -> None:
     with context.begin_transaction():
         context.run_migrations()
 
-
+# -------------------------------------------------
+# Online migrations
+# -------------------------------------------------
 def run_migrations_online() -> None:
     url = get_database_url()
     engine = create_engine(url, poolclass=pool.NullPool)
@@ -64,8 +80,11 @@ def run_migrations_online() -> None:
         with context.begin_transaction():
             context.run_migrations()
 
-
+# -------------------------------------------------
+# Entrypoint
+# -------------------------------------------------
 if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+

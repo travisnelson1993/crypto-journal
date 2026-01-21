@@ -1,18 +1,51 @@
-import uuid
-from datetime import datetime
-from sqlalchemy import Column, DateTime, Integer, Text
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+import enum
+from sqlalchemy import Column, Integer, DateTime, ForeignKey
+from sqlalchemy.sql import func
+from sqlalchemy.dialects.postgresql import ENUM
 
 from app.db.database import Base
 
+
+# -------------------------
+# ENUM
+# -------------------------
+class TradeMindsetTagType(str, enum.Enum):
+    fomo = "fomo"
+    revenge = "revenge"
+    hesitation = "hesitation"
+    overconfidence = "overconfidence"
+    fear = "fear"
+    discipline = "discipline"
+    patience = "patience"
+    impulsive = "impulsive"
+
+
+# -------------------------
+# MODEL
+# -------------------------
 class TradeMindsetTag(Base):
     __tablename__ = "trade_mindset_tags"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    trade_id = Column(Integer, nullable=False)
-    user_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    id = Column(Integer, primary_key=True)
 
-    tags = Column(JSONB, nullable=False)
-    optional_note = Column(Text, nullable=True)
+    trade_note_id = Column(
+        Integer,
+        ForeignKey("trade_notes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    tag = Column(
+        ENUM(
+            TradeMindsetTagType,
+            name="trade_mindset_tag_enum",
+            create_type=False,  # 🔒 Alembic owns enum lifecycle
+        ),
+        nullable=False,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
