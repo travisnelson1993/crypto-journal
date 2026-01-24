@@ -5,11 +5,12 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from app.db.database import get_db
-from app.models.trade import Trade
+from app.models.executions import Execution
 
 # -------------------------------------------------
 # Router
@@ -71,24 +72,23 @@ def parse_side(side: Optional[str]):
     s = re.sub(r"\(.*?\)", "", s).strip()
 
     if s.startswith("open long"):
-        return "OPEN", "long"
+        return "OPEN", "LONG"
     if s.startswith("close long"):
-        return "CLOSE", "long"
+        return "CLOSE", "LONG"
     if s.startswith("open short"):
-        return "OPEN", "short"
+        return "OPEN", "SHORT"
     if s.startswith("close short"):
-        return "CLOSE", "short"
+        return "CLOSE", "SHORT"
 
     return None, None
 
 
 # -------------------------------------------------
-# CSV IMPORT (EXECUTION-ONLY LEDGER)
+# CSV IMPORT (EXECUTION-ONLY LEDGER — v2 LOCKED)
 # -------------------------------------------------
 @router.post("/csv", status_code=status.HTTP_200_OK)
-async def import_csv(
+async def import_csv_v2(
     file: UploadFile = File(...),
-    mode: str = Query("append", pattern="^(append|replace)$"),
     db: AsyncSession = Depends(get_db),
 ):
     if not file.filename.lower().endswith(".csv"):
@@ -100,77 +100,64 @@ async def import_csv(
 
     rows = list(csv.DictReader(io.StringIO(contents.decode(errors="replace"))))
 
-    # Sort by execution time (critical for later derivations)
     rows.sort(
         key=lambda r: parse_datetime(r.get("Order Time") or r.get("Order Date"))
         or datetime.min
     )
 
-    if mode == "replace":
-        # Safe in test DB — rebuilds everything deterministically
-        await db.execute("DELETE FROM trades")
-        await db.commit()
+    created = skipped = duplicates = 0
 
-    created = skipped = 0
+    async with db.begin():  # ✅ ONE outer transaction
+        for raw in rows:
+            side, direction = parse_side(raw.get("Side"))
 
-    for raw in rows:
-        action, direction = parse_side(raw.get("Side"))
+            symbol = (
+                raw.get("Underlying Asset")
+                or raw.get("Ticker")
+                or raw.get("Symbol")
+                or ""
+            ).strip().upper()
 
-        symbol = (
-            raw.get("Underlying Asset")
-            or raw.get("Ticker")
-            or raw.get("Symbol")
-            or raw.get("symbol")
-            or ""
-        ).strip().upper()
+            if not side or not direction or not symbol:
+                skipped += 1
+                continue
 
-        if not action or not direction or not symbol:
-            skipped += 1
-            continue
+            price = parse_money(raw.get("Avg Fill"))
+            qty = parse_money(raw.get("Filled"))
+            fee = parse_money(raw.get("Fee")) or Decimal("0")
+            ts = parse_datetime(raw.get("Order Time") or raw.get("Order Date"))
 
-        price = parse_money(raw.get("Avg Fill"))
-        qty = parse_money(raw.get("Filled"))
-        leverage = parse_money(raw.get("Leverage")) or Decimal("1")
-        fee = parse_money(raw.get("Fee")) or Decimal("0")
-        ts = parse_datetime(raw.get("Order Time") or raw.get("Order Date"))
+            if price is None or qty is None or qty <= 0 or ts is None:
+                skipped += 1
+                continue
 
-        if price is None or qty is None or qty <= 0:
-            skipped += 1
-            continue
+            execution = Execution(
+                source="blofin",
+                source_filename=file.filename,
+                ticker=symbol,
+                side=side,
+                direction=direction,
+                price=price,
+                quantity=qty,
+                remaining_qty=qty if side == "OPEN" else Decimal("0"),
+                timestamp=ts,
+                fee=fee,
+            )
 
-        # -------------------------------------------------
-        # EXECUTION-LEVEL TRADE ROW
-        # -------------------------------------------------
-        trade = Trade(
-            ticker=symbol,
-            direction=direction,
-            quantity=qty,
-            original_quantity=qty,
-            leverage=leverage,
-            fee=fee,
-            source="blofin_order_history",
-        )
-
-        if action == "OPEN":
-            trade.entry_price = price
-            trade.entry_date = ts
-            trade.exit_price = None
-            trade.end_date = None
-
-        else:  # CLOSE
-            trade.entry_price = None
-            trade.entry_date = None
-            trade.exit_price = price
-            trade.end_date = ts
-            trade.quantity = Decimal("0")
-
-        db.add(trade)
-        created += 1
-
-    await db.commit()
+            # 🔐 SAVEPOINT per execution
+            async with db.begin_nested():
+                try:
+                    db.add(execution)
+                    await db.flush()
+                    created += 1
+                except IntegrityError:
+                    duplicates += 1
+                    # nested transaction auto-rolls back
+                    continue
 
     return {
         "ok": True,
-        "created_trades": created,
+        "created_executions": created,
+        "duplicate_executions": duplicates,
         "skipped_rows": skipped,
     }
