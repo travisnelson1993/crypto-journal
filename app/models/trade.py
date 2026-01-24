@@ -69,7 +69,7 @@ class Trade(Base):
     )
 
     # -------------------------------------------------
-    # Risk & sizing (trade-defined)
+    # Risk & sizing (trade-defined, execution-time)
     # -------------------------------------------------
     stop_loss: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 8), nullable=True
@@ -112,6 +112,14 @@ class Trade(Base):
     # Risk engine advisory (SOFT warnings only)
     # -------------------------------------------------
     risk_warnings: Mapped[Optional[dict]] = mapped_column(
+        MutableDict.as_mutable(JSONB),
+        nullable=True,
+    )
+
+    # -------------------------------------------------
+    # Pre-trade planning intent (Category 3 — Option A)
+    # -------------------------------------------------
+    trade_plan: Mapped[Optional[dict]] = mapped_column(
         MutableDict.as_mutable(JSONB),
         nullable=True,
     )

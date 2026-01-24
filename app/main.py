@@ -12,7 +12,7 @@ from app.api import positions as positions_router
 from app.api.analytics.risk_warnings import router as risk_warnings_router
 from app.api.journal import daily_router, trade_notes_router
 from app.api.debug import router as debug_router
-
+from app.api import risk as risk_router
 
 # -------------------------------------------------
 # App
@@ -38,6 +38,7 @@ app.include_router(stats_router.router)
 app.include_router(imports_router.router)
 app.include_router(positions_router.router)
 app.include_router(risk_warnings_router)
+app.include_router(risk_router.router)
 
 # Journaling (Phase 2A / 2B)
 app.include_router(daily_router)
