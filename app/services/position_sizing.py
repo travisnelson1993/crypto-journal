@@ -1,5 +1,3 @@
-# app/services/position_sizing.py
-
 from typing import Dict
 
 
@@ -19,18 +17,9 @@ def calculate_position_size(
 
     All values are USDT-based.
 
-    Args:
-        equity: Account equity in USDT.
-        risk_pct: Risk as a decimal (e.g. 0.01 = 1%).
-        entry_price: Entry price.
-        stop_loss: Stop-loss price.
-
-    Returns:
-        dict with:
-            quantity
-            notional
-            risk_amount
-            price_distance
+    Advisory only:
+    - Does not mutate trades
+    - Does not enforce limits
     """
 
     # --- Validation ---
