@@ -53,11 +53,15 @@ async def async_engine():
 
 @pytest_asyncio.fixture
 async def async_session(async_engine) -> AsyncSession:
-    async_session_factory = async_sessionmaker(
-        bind=async_engine,
-        expire_on_commit=False,
-    )
+    async with async_engine.connect() as conn:
+        trans = await conn.begin()  # 🔑 START TRANSACTION
 
-    async with async_session_factory() as session:
-        yield session
-        await session.rollback()
+        async_session_factory = async_sessionmaker(
+            bind=conn,
+            expire_on_commit=False,
+        )
+
+        async with async_session_factory() as session:
+            yield session
+
+        await trans.rollback()  # 🔑 FULL DB CLEANUP
