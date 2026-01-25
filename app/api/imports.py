@@ -59,7 +59,7 @@ def parse_datetime(value: Optional[str]) -> Optional[datetime]:
 
 def parse_side(side: Optional[str]):
     """
-    Blofin Side examples:
+    BloFin Side examples:
     - Open Long
     - Close Long(SL)
     - Open Short
@@ -100,6 +100,7 @@ async def import_csv_v2(
 
     rows = list(csv.DictReader(io.StringIO(contents.decode(errors="replace"))))
 
+    # FIFO-safe ordering
     rows.sort(
         key=lambda r: parse_datetime(r.get("Order Time") or r.get("Order Date"))
         or datetime.min
@@ -139,7 +140,7 @@ async def import_csv_v2(
                 direction=direction,
                 price=price,
                 quantity=qty,
-                remaining_qty=qty if side == "OPEN" else Decimal("0"),
+                remaining_qty=qty,  # ✅ FIX: applies to BOTH OPEN and CLOSE
                 timestamp=ts,
                 fee=fee,
             )
@@ -152,7 +153,6 @@ async def import_csv_v2(
                     created += 1
                 except IntegrityError:
                     duplicates += 1
-                    # nested transaction auto-rolls back
                     continue
 
     return {

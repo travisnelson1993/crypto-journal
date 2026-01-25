@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Import Blofin CSV(s) into the trades table.
+Import Blofin CSV(s).
+
+Option A (recommended right now):
+  --executions-only  -> writes ONLY to executions + imported_files
 
 CI-SAFE / TRANSACTION-SAFE
 --------------------------
@@ -9,11 +12,7 @@ CI-SAFE / TRANSACTION-SAFE
 ✔ NO autocommit toggling on active connections
 ✔ DDL runs in a dedicated connection
 ✔ Each CSV row runs in its own transaction
-✔ WHERE NOT EXISTS idempotency for open trades
-✔ Close rows always inserted
 ✔ imported_files tracked by SHA-256
-
-This version is stable in GitHub Actions and locally.
 """
 
 import argparse
@@ -21,7 +20,6 @@ import glob
 import hashlib
 import os
 import shutil
-import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -34,6 +32,20 @@ SOURCE_NAME = "blofin_order_history"
 
 
 # ───────────────────────── helpers ─────────────────────────
+
+def normalize_psycopg2_dsn(dsn: str) -> str:
+    """
+    psycopg2 does NOT accept SQLAlchemy async URLs like:
+      postgresql+asyncpg://...
+    Convert to:
+      postgresql://...
+    """
+    if not dsn:
+        return dsn
+    if dsn.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
+    return dsn
+
 
 def file_sha256(path: str) -> str:
     h = hashlib.sha256()
@@ -74,20 +86,19 @@ def parse_datetime(s, tz=None):
         ts = dt.to_pydatetime()
         if tz:
             ts = ts.replace(tzinfo=ZoneInfo(tz)).astimezone(ZoneInfo("UTC"))
-            return ts.replace(tzinfo=None)
+            return ts  # tz-aware UTC
+        # if no tz passed, return tz-aware UTC if it already has tz; else naive
         return ts
     except Exception:
         return None
 
 
-def make_entry_summary(side, status):
-    side = side or ""
-    status = status or ""
-    if side.lower().startswith("open"):
-        return f"Imported: {side}"
-    if status.lower().startswith("filled"):
-        return f"Imported orphan close: {side}"
-    return f"Imported close: {side}"
+def pick_first(row, *keys):
+    for k in keys:
+        v = row.get(k)
+        if v is not None and str(v).strip() != "":
+            return v
+    return None
 
 
 # ───────────────────── DDL (DEDICATED CONNECTION) ─────────────────────
@@ -95,7 +106,6 @@ def make_entry_summary(side, status):
 def ensure_imported_files_table_dedicated(dsn: str):
     """
     Run DDL in a short-lived, dedicated connection.
-    This avoids poisoning the main transaction in CI.
     """
     with psycopg2.connect(dsn) as conn:
         conn.autocommit = True
@@ -114,12 +124,20 @@ def ensure_imported_files_table_dedicated(dsn: str):
 
 # ───────────────────────── core ─────────────────────────
 
-def process_file(conn, dsn, file_path, tz=None, archive_dir=None, dry_run=False):
+def process_file(
+    conn,
+    dsn,
+    file_path,
+    tz=None,
+    archive_dir=None,
+    dry_run=False,
+    executions_only=False,
+):
     print(f"Processing: {file_path}")
     basename = os.path.basename(file_path)
     file_hash = file_sha256(file_path)
 
-    # Ensure imported_files table exists (safe)
+    # Ensure imported_files table exists
     ensure_imported_files_table_dedicated(dsn)
 
     # Skip already imported file
@@ -136,92 +154,97 @@ def process_file(conn, dsn, file_path, tz=None, archive_dir=None, dry_run=False)
     failed_rows = 0
 
     for i, row in df.iterrows():
-        ticker = (
-            row.get("Underlying Asset")
-            or row.get("Ticker")
-            or row.get("symbol")
-            or row.get("Instrument")
+        ticker = pick_first(
+            row,
+            "Underlying Asset",
+            "Ticker",
+            "symbol",
+            "Instrument",
         )
         if not ticker:
             continue
-        ticker = ticker.strip()
+        ticker = str(ticker).strip()
 
-        side = row.get("Side", "")
-        status = row.get("Status", "")
-        avg_fill = parse_price(row.get("Avg Fill"))
-        entry_date = parse_datetime(row.get("Order Time"), tz)
+        side_raw = str(row.get("Side", "") or "")
+        action, direction, _ = infer_action_and_direction(side_raw)
+        if not action or not direction:
+            # if side parsing fails, skip the row
+            continue
 
-        try:
-            leverage_val = int(row.get("Leverage") or 1)
-        except Exception:
-            leverage_val = 1
+        # executions.side enum expects: OPEN/CLOSE
+        exec_side = "OPEN" if action == "OPEN" else "CLOSE"
+        # executions.direction enum expects: LONG/SHORT
+        exec_direction = "LONG" if direction.upper() == "LONG" else "SHORT"
 
-        action, direction, _ = infer_action_and_direction(side)
-        open_flag = action == "OPEN"
-        entry_summary = make_entry_summary(side, status)
+        # price in executions = avg fill (best available from BloFin file)
+        price = parse_price(pick_first(row, "Avg Fill", "Avg fill", "AvgFill", "Price"))
+
+        # quantity in executions = filled quantity
+        qty = parse_price(pick_first(row, "Filled", "Fill", "Executed", "Quantity", "Qty"))
+        if qty is None:
+            # if we can't parse quantity, skip
+            continue
+
+        # fee
+        fee = parse_price(pick_first(row, "Fee", "Trading Fee", "Commission"))
+
+        # timestamp
+        ts = parse_datetime(pick_first(row, "Order Time", "Time", "Timestamp"), tz=tz)
+        if ts is None:
+            continue
+
         created_at = datetime.utcnow()
 
         try:
             with conn.cursor() as cur:
-                if open_flag:
+                if executions_only:
+                    # IMPORTANT: no trades writes at all
                     cur.execute(
                         """
-                        INSERT INTO trades
-                        (ticker, direction, entry_price, exit_price, stop_loss,
-                         leverage, entry_date, end_date, entry_summary,
-                         orphan_close, source, created_at, source_filename, is_duplicate)
-                        SELECT %s,%s,%s,NULL,NULL,
-                               %s,%s,NULL,%s,
-                               false,%s,%s,%s,false
+                        INSERT INTO executions
+                        (source, source_filename, ticker, side, direction,
+                         price, quantity, remaining_qty, timestamp, fee, created_at)
+                        SELECT %s,%s,%s,%s,%s,
+                               %s,%s,%s,%s,%s,%s
                         WHERE NOT EXISTS (
-                            SELECT 1 FROM trades
-                            WHERE ticker=%s
+                            SELECT 1 FROM executions
+                            WHERE source=%s
+                              AND source_filename=%s
+                              AND ticker=%s
+                              AND side=%s
                               AND direction=%s
-                              AND entry_price=%s
-                              AND entry_date=%s
-                              AND end_date IS NULL
+                              AND price=%s
+                              AND quantity=%s
+                              AND timestamp=%s
                         )
                         """,
                         (
-                            ticker,
-                            direction,
-                            avg_fill,
-                            leverage_val,
-                            entry_date,
-                            entry_summary,
                             SOURCE_NAME,
-                            created_at,
                             basename,
                             ticker,
-                            direction,
-                            avg_fill,
-                            entry_date,
+                            exec_side,
+                            exec_direction,
+                            price,
+                            qty,
+                            qty,   # remaining_qty starts full for BOTH open and close legs
+                            ts,
+                            fee,
+                            created_at,
+                            # dedupe keys
+                            SOURCE_NAME,
+                            basename,
+                            ticker,
+                            exec_side,
+                            exec_direction,
+                            price,
+                            qty,
+                            ts,
                         ),
                     )
                 else:
-                    cur.execute(
-                        """
-                        INSERT INTO trades
-                        (ticker, direction, entry_price, exit_price, stop_loss,
-                         leverage, entry_date, end_date, entry_summary,
-                         orphan_close, source, created_at, source_filename, is_duplicate)
-                        VALUES (%s,%s,%s,%s,NULL,
-                                %s,%s,%s,%s,
-                                false,%s,%s,%s,false)
-                        """,
-                        (
-                            ticker,
-                            direction,
-                            avg_fill,
-                            avg_fill,
-                            leverage_val,
-                            entry_date,
-                            entry_date,
-                            entry_summary,
-                            SOURCE_NAME,
-                            created_at,
-                            basename,
-                        ),
+                    raise RuntimeError(
+                        "This script is currently locked to Option A. "
+                        "Run with --executions-only."
                     )
 
             if dry_run:
@@ -268,11 +291,17 @@ def main():
     p.add_argument("--archive-dir", "-a", default=None)
     p.add_argument("--tz", "-t", default=None)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--executions-only", action="store_true")
     args = p.parse_args()
 
     dsn = args.db or os.getenv("CRYPTO_JOURNAL_DSN")
     if not dsn:
         raise SystemExit("CRYPTO_JOURNAL_DSN not set")
+
+    dsn = normalize_psycopg2_dsn(dsn)
+
+    if not args.executions_only:
+        raise SystemExit("For now, run with --executions-only (Option A).")
 
     paths = gather_input_paths(args.input)
     if not paths:
@@ -289,6 +318,7 @@ def main():
                 tz=args.tz,
                 archive_dir=args.archive_dir,
                 dry_run=args.dry_run,
+                executions_only=args.executions_only,
             )
     finally:
         conn.close()
