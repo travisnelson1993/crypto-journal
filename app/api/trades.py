@@ -13,6 +13,7 @@ from app.models.trade import Trade
 from app.services.trade_close import close_trade
 from app.services.analytics.position_sizing import position_sizing
 from app.risk.advisories import compute_risk_advisories
+from app.schemas.trade_plan import TradePlanUpdate
 
 
 # -------------------------------------------------
@@ -48,7 +49,6 @@ async def open_trade(
 
     risk_warnings = None
 
-    # Normalize ENTRY advisories into lifecycle bucket
     if not advisory.get("trading_allowed", True):
         risk_warnings = {
             "entry_advisory": [
@@ -95,7 +95,7 @@ async def open_trade(
 
 
 # =================================================
-# READ SINGLE TRADE (DEBUG / UI)
+# READ SINGLE TRADE (SAFE SERIALIZATION)
 # =================================================
 @router.get("/{trade_id}")
 async def get_trade(
@@ -112,28 +112,49 @@ async def get_trade(
         "id": trade.id,
         "ticker": trade.ticker,
         "direction": trade.direction,
-        "entry_price": float(trade.entry_price),
-        "quantity": float(trade.quantity),
-        "original_quantity": float(trade.original_quantity),
+
+        "entry_price": (
+            float(trade.entry_price) if trade.entry_price is not None else None
+        ),
+
+        "quantity": (
+            float(trade.quantity)
+            if trade.quantity is not None
+            else float(trade.original_quantity)
+            if trade.original_quantity is not None
+            else None
+        ),
+
+        "original_quantity": (
+            float(trade.original_quantity)
+            if trade.original_quantity is not None
+            else None
+        ),
+
         "leverage": float(trade.leverage),
-        "entry_date": trade.entry_date.isoformat(),
-        "stop_loss": float(trade.stop_loss) if trade.stop_loss else None,
-        "account_equity_at_entry": (
-            float(trade.account_equity_at_entry)
-            if trade.account_equity_at_entry
+
+        "created_at": trade.created_at.isoformat(),
+
+        "stop_loss": (
+            float(trade.stop_loss) if trade.stop_loss is not None else None
+        ),
+
+        "fee": float(trade.fee) if trade.fee is not None else None,
+
+        "realized_pnl": (
+            float(trade.realized_pnl)
+            if trade.realized_pnl is not None
             else None
         ),
-        "risk_usd_at_entry": (
-            float(trade.risk_usd_at_entry)
-            if trade.risk_usd_at_entry
+
+        "realized_pnl_pct": (
+            float(trade.realized_pnl_pct)
+            if trade.realized_pnl_pct is not None
             else None
         ),
-        "risk_pct_at_entry": (
-            float(trade.risk_pct_at_entry)
-            if trade.risk_pct_at_entry
-            else None
-        ),
+
         "risk_warnings": trade.risk_warnings,
+        "trade_plan": trade.trade_plan,
     }
 
 
@@ -174,13 +195,65 @@ async def close_trade_endpoint(
     return {
         "id": trade.id,
         "ticker": trade.ticker,
-        "realized_pnl": float(trade.realized_pnl),
-        "realized_pnl_pct": float(trade.realized_pnl_pct),
+        "realized_pnl": float(trade.realized_pnl) if trade.realized_pnl is not None else None,
+        "realized_pnl_pct": (
+            float(trade.realized_pnl_pct)
+            if trade.realized_pnl_pct is not None
+            else None
+        ),
     }
 
 
 # =================================================
-# STEP 1.5 — EQUITY SNAPSHOT (IMMUTABLE)
+# PRE-TRADE PLAN (INTENT ONLY — Category 3 Option A)
+# =================================================
+@router.patch("/{trade_id}/plan")
+async def update_trade_plan(
+    trade_id: int,
+    payload: TradePlanUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    trade = result.scalar_one_or_none()
+
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    if trade.end_date is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot update plan on closed trade",
+        )
+
+    updates = payload.model_dump(exclude_unset=True)
+
+    if (
+        "planned_entry_price" in updates
+        and "planned_stop_price" in updates
+        and updates["planned_entry_price"] == updates["planned_stop_price"]
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="planned_entry_price and planned_stop_price cannot be equal",
+        )
+
+    trade.trade_plan = {
+        **(trade.trade_plan or {}),
+        **updates,
+    }
+
+    await db.commit()
+    await db.refresh(trade)
+
+    return {
+        "status": "ok",
+        "trade_id": trade.id,
+        "trade_plan": trade.trade_plan,
+    }
+
+
+# =================================================
+# EQUITY SNAPSHOT (IMMUTABLE)
 # =================================================
 class EquitySnapshotIn(BaseModel):
     account_equity_at_entry: Decimal = Field(..., gt=Decimal("0"))
@@ -193,11 +266,6 @@ async def set_equity_snapshot(
     payload: EquitySnapshotIn,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Immutable equity snapshot at trade entry.
-    Advisory-only risk evaluation occurs here.
-    """
-
     result = await db.execute(select(Trade).where(Trade.id == trade_id))
     trade = result.scalar_one_or_none()
 
@@ -237,12 +305,12 @@ async def set_equity_snapshot(
         "account_equity_at_entry": float(trade.account_equity_at_entry),
         "risk_usd_at_entry": (
             float(trade.risk_usd_at_entry)
-            if trade.risk_usd_at_entry
+            if trade.risk_usd_at_entry is not None
             else None
         ),
         "risk_pct_at_entry": (
             float(trade.risk_pct_at_entry)
-            if trade.risk_pct_at_entry
+            if trade.risk_pct_at_entry is not None
             else None
         ),
         "risk_warnings": trade.risk_warnings,

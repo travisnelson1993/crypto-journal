@@ -3,7 +3,6 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
-    Boolean,
     DateTime,
     Float,
     Integer,
@@ -15,7 +14,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.database import Base  # ✅ SHARED BASE
+from app.db.database import Base
 
 
 class Trade(Base):
@@ -30,13 +29,11 @@ class Trade(Base):
     direction: Mapped[str] = mapped_column(String(10))  # long / short
 
     # -------------------------------------------------
-    # Quantity tracking (CRITICAL)
+    # Quantity tracking
     # -------------------------------------------------
     quantity: Mapped[Decimal] = mapped_column(
         Numeric(18, 8), nullable=False
     )
-
-    # ORIGINAL position size (never changes)
     original_quantity: Mapped[Decimal] = mapped_column(
         Numeric(18, 8), nullable=False
     )
@@ -52,15 +49,11 @@ class Trade(Base):
     )
 
     # -------------------------------------------------
-    # Fees
+    # Fees & realized performance
     # -------------------------------------------------
-    fee: Mapped[Decimal] = mapped_column(
-        Numeric(18, 8), default=Decimal("0")
+    fee: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(18, 8), nullable=True
     )
-
-    # -------------------------------------------------
-    # REALIZED PERFORMANCE (locked on close)
-    # -------------------------------------------------
     realized_pnl: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 8), nullable=True
     )
@@ -69,64 +62,36 @@ class Trade(Base):
     )
 
     # -------------------------------------------------
-    # Risk & sizing (trade-defined, execution-time)
+    # Risk & sizing
     # -------------------------------------------------
     stop_loss: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 8), nullable=True
     )
-    leverage: Mapped[float] = mapped_column(Float, default=1.0)
-
-    # -------------------------------------------------
-    # Equity snapshot at entry (IMMUTABLE)
-    # -------------------------------------------------
-    account_equity_at_entry: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(18, 2), nullable=True
-    )
-    risk_usd_at_entry: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(18, 2), nullable=True
-    )
-    risk_pct_at_entry: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(10, 4), nullable=True
+    leverage: Mapped[float] = mapped_column(
+        Float,
+        server_default="1",
+        nullable=False,
     )
 
     # -------------------------------------------------
-    # Timing
-    # -------------------------------------------------
-    entry_date: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    end_date: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-    # -------------------------------------------------
-    # Metadata
-    # -------------------------------------------------
-    entry_summary: Mapped[Optional[str]] = mapped_column(
-        String(255), nullable=True
-    )
-    orphan_close: Mapped[bool] = mapped_column(Boolean, default=False)
-    source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-
-    # -------------------------------------------------
-    # Risk engine advisory (SOFT warnings only)
+    # Advisory & planning
     # -------------------------------------------------
     risk_warnings: Mapped[Optional[dict]] = mapped_column(
         MutableDict.as_mutable(JSONB),
         nullable=True,
     )
-
-    # -------------------------------------------------
-    # Pre-trade planning intent (Category 3 — Option A)
-    # -------------------------------------------------
     trade_plan: Mapped[Optional[dict]] = mapped_column(
         MutableDict.as_mutable(JSONB),
         nullable=True,
     )
 
+    # -------------------------------------------------
+    # Metadata
+    # -------------------------------------------------
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
+        nullable=False,
     )
 
     # -------------------------------------------------
