@@ -4,8 +4,7 @@ from collections import defaultdict, deque
 from decimal import Decimal
 from sqlalchemy import select, delete
 
-from app.models.executions import Execution
-from app.models.execution_match import ExecutionMatch
+from app.models.executions import Execution, ExecutionMatch
 
 
 async def rebuild_execution_matches(session):

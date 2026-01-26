@@ -4,7 +4,7 @@ from collections import defaultdict, deque
 from decimal import Decimal
 from sqlalchemy import select
 
-from app.models.executions import Execution
+from app.models.executions import Execution, ExecutionMatch
 
 
 class ExecutionMatch:
