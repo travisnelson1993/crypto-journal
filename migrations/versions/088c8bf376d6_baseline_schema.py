@@ -9,9 +9,6 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-# trade_mindset_tags intentionally excluded from baseline schema.
-# Journal / mindset features will be added in later migrations once finalized.
-
 revision = '088c8bf376d6'
 down_revision = None
 branch_labels = None
@@ -19,10 +16,10 @@ depends_on = None
 
 
 # ─────────────────────────────────────────────────────────────
-# ENUM DEFINITIONS (idempotent)
+# ENUM CREATION (POSTGRES-SAFE)
 # ─────────────────────────────────────────────────────────────
 
-def create_enum_if_not_exists(name, values):
+def create_enum(name, values):
     vals = ", ".join(f"'{v}'" for v in values)
     op.execute(f"""
     DO $$
@@ -30,76 +27,51 @@ def create_enum_if_not_exists(name, values):
         IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{name}') THEN
             CREATE TYPE {name} AS ENUM ({vals});
         END IF;
-    END
-    $$;
+    END$$;
     """)
 
 
 def upgrade():
     # ── ENUMS ────────────────────────────────────────────────
-    create_enum_if_not_exists('exec_side', ['OPEN', 'CLOSE'])
-    create_enum_if_not_exists('exec_direction', ['LONG', 'SHORT'])
-    create_enum_if_not_exists(
-        'trade_event_type_enum',
-        ['hold', 'partial', 'move_sl', 'scale_in', 'exit_early']
-    )
-    create_enum_if_not_exists(
-        'trade_event_reason_enum',
-        ['plan_based', 'emotion_based', 'external_signal']
-    )
-    create_enum_if_not_exists(
-        'trade_emotion_enum',
-        ['calm', 'fear', 'greed', 'doubt', 'impatience']
-    )
-    create_enum_if_not_exists(
-        'exit_type_enum',
-        ['tp', 'sl', 'manual', 'early']
-    )
-    create_enum_if_not_exists(
-        'violation_reason_enum',
-        ['fomo', 'loss_aversion', 'doubt', 'impatience']
-    )
-    create_enum_if_not_exists(
-        'would_take_again_enum',
-        ['yes', 'no', 'with_changes']
-    )
+    create_enum('exec_side', ['OPEN', 'CLOSE'])
+    create_enum('exec_direction', ['LONG', 'SHORT'])
+    create_enum('trade_event_type_enum',
+                ['hold', 'partial', 'move_sl', 'scale_in', 'exit_early'])
+    create_enum('trade_event_reason_enum',
+                ['plan_based', 'emotion_based', 'external_signal'])
+    create_enum('trade_emotion_enum',
+                ['calm', 'fear', 'greed', 'doubt', 'impatience'])
+    create_enum('exit_type_enum', ['tp', 'sl', 'manual', 'early'])
+    create_enum('violation_reason_enum',
+                ['fomo', 'loss_aversion', 'doubt', 'impatience'])
+    create_enum('would_take_again_enum',
+                ['yes', 'no', 'with_changes'])
 
     # ── EXECUTIONS ───────────────────────────────────────────
     op.create_table(
         'executions',
         sa.Column('id', sa.Integer(), primary_key=True),
         sa.Column('source', sa.String(), nullable=False),
-        sa.Column('source_filename', sa.String(), nullable=True),
+        sa.Column('source_filename', sa.String()),
         sa.Column('ticker', sa.String(), nullable=False),
-        sa.Column(
-            'side',
-            sa.Enum('OPEN', 'CLOSE', name='exec_side', create_type=False),
-            nullable=False
-        ),
-        sa.Column(
-            'direction',
-            sa.Enum('LONG', 'SHORT', name='exec_direction', create_type=False),
-            nullable=False
-        ),
+        sa.Column('side',
+                  postgresql.ENUM(name='exec_side', create_type=False),
+                  nullable=False),
+        sa.Column('direction',
+                  postgresql.ENUM(name='exec_direction', create_type=False),
+                  nullable=False),
         sa.Column('price', sa.Numeric(18, 8), nullable=False),
         sa.Column('quantity', sa.Numeric(18, 8), nullable=False),
         sa.Column('remaining_qty', sa.Numeric(18, 8), nullable=False),
         sa.Column('timestamp', sa.DateTime(timezone=True), nullable=False),
-        sa.Column('fee', sa.Numeric(18, 8), nullable=True),
-        sa.Column(
-            'created_at',
-            sa.DateTime(timezone=True),
-            server_default=sa.text('now()')
-        ),
+        sa.Column('fee', sa.Numeric(18, 8)),
+        sa.Column('created_at',
+                  sa.DateTime(timezone=True),
+                  server_default=sa.text('now()')),
         sa.UniqueConstraint(
-            'source',
-            'source_filename',
-            'ticker',
-            'side',
-            'direction',
-            'price',
-            'quantity',
-            'timestamp',
+            'source', 'source_filename', 'ticker',
+            'side', 'direction', 'price',
+            'quantity', 'timestamp',
             name='uq_execution_dedupe'
         )
     )
@@ -111,11 +83,9 @@ def upgrade():
         sa.Column('close_execution_id', sa.Integer()),
         sa.Column('open_execution_id', sa.Integer()),
         sa.Column('matched_quantity', sa.Numeric(18, 8), nullable=False),
-        sa.Column(
-            'created_at',
-            sa.DateTime(timezone=True),
-            server_default=sa.text('now()')
-        ),
+        sa.Column('created_at',
+                  sa.DateTime(timezone=True),
+                  server_default=sa.text('now()')),
         sa.ForeignKeyConstraint(['close_execution_id'], ['executions.id']),
         sa.ForeignKeyConstraint(['open_execution_id'], ['executions.id']),
     )
@@ -134,11 +104,8 @@ def upgrade():
         sa.Column('created_at', sa.DateTime()),
         sa.UniqueConstraint('trade_id')
     )
-    op.create_index(
-        'ix_trade_entry_notes_user_id',
-        'trade_entry_notes',
-        ['user_id']
-    )
+    op.create_index('ix_trade_entry_notes_user_id',
+                    'trade_entry_notes', ['user_id'])
 
     # ── TRADE EVENTS ─────────────────────────────────────────
     op.create_table(
@@ -146,40 +113,22 @@ def upgrade():
         sa.Column('id', sa.UUID(), primary_key=True),
         sa.Column('trade_id', sa.Integer(), nullable=False),
         sa.Column('user_id', sa.UUID(), nullable=False),
-        sa.Column(
-            'event_type',
-            sa.Enum(
-                'hold', 'partial', 'move_sl', 'scale_in', 'exit_early',
-                name='trade_event_type_enum',
-                create_type=False
-            ),
-            nullable=False
-        ),
-        sa.Column(
-            'reason',
-            sa.Enum(
-                'plan_based', 'emotion_based', 'external_signal',
-                name='trade_event_reason_enum',
-                create_type=False
-            ),
-            nullable=False
-        ),
-        sa.Column(
-            'emotion',
-            sa.Enum(
-                'calm', 'fear', 'greed', 'doubt', 'impatience',
-                name='trade_emotion_enum',
-                create_type=False
-            )
-        ),
+        sa.Column('event_type',
+                  postgresql.ENUM(name='trade_event_type_enum',
+                                  create_type=False),
+                  nullable=False),
+        sa.Column('reason',
+                  postgresql.ENUM(name='trade_event_reason_enum',
+                                  create_type=False),
+                  nullable=False),
+        sa.Column('emotion',
+                  postgresql.ENUM(name='trade_emotion_enum',
+                                  create_type=False)),
         sa.Column('emotion_note', sa.Text()),
         sa.Column('created_at', sa.DateTime())
     )
-    op.create_index(
-        'ix_trade_events_user_id',
-        'trade_events',
-        ['user_id']
-    )
+    op.create_index('ix_trade_events_user_id',
+                    'trade_events', ['user_id'])
 
     # ── TRADE EXIT NOTES ─────────────────────────────────────
     op.create_table(
@@ -187,44 +136,26 @@ def upgrade():
         sa.Column('id', sa.UUID(), primary_key=True),
         sa.Column('trade_id', sa.Integer(), nullable=False),
         sa.Column('user_id', sa.UUID(), nullable=False),
-        sa.Column(
-            'exit_type',
-            sa.Enum('tp', 'sl', 'manual', 'early',
-                    name='exit_type_enum',
-                    create_type=False),
-            nullable=False
-        ),
+        sa.Column('exit_type',
+                  postgresql.ENUM(name='exit_type_enum',
+                                  create_type=False),
+                  nullable=False),
         sa.Column('plan_followed', sa.Integer(), nullable=False),
-        sa.Column(
-            'violation_reason',
-            sa.Enum(
-                'fomo', 'loss_aversion', 'doubt', 'impatience',
-                name='violation_reason_enum',
-                create_type=False
-            )
-        ),
-        sa.Column(
-            'would_take_again',
-            sa.Enum(
-                'yes', 'no', 'with_changes',
-                name='would_take_again_enum',
-                create_type=False
-            )
-        ),
+        sa.Column('violation_reason',
+                  postgresql.ENUM(name='violation_reason_enum',
+                                  create_type=False)),
+        sa.Column('would_take_again',
+                  postgresql.ENUM(name='would_take_again_enum',
+                                  create_type=False)),
         sa.Column('created_at', sa.DateTime()),
         sa.UniqueConstraint('trade_id')
     )
-    op.create_index(
-        'ix_trade_exit_notes_user_id',
-        'trade_exit_notes',
-        ['user_id']
-    )
+    op.create_index('ix_trade_exit_notes_user_id',
+                    'trade_exit_notes', ['user_id'])
 
     # ── TRADES.quantity SAFE ADD ─────────────────────────────
-    op.add_column(
-        'trades',
-        sa.Column('quantity', sa.Numeric(18, 8), nullable=True)
-    )
+    op.add_column('trades',
+                  sa.Column('quantity', sa.Numeric(18, 8)))
 
     op.execute("""
         UPDATE trades
@@ -233,15 +164,8 @@ def upgrade():
     """)
 
     op.alter_column('trades', 'quantity', nullable=False)
-
     op.alter_column('trades', 'original_quantity', nullable=False)
     op.alter_column('trades', 'entry_price', nullable=False)
-    op.alter_column(
-        'trades',
-        'risk_warnings',
-        type_=postgresql.JSONB(),
-        existing_nullable=True
-    )
     op.alter_column('trades', 'created_at', nullable=False)
 
     op.create_index('ix_trades_id', 'trades', ['id'])
@@ -249,12 +173,9 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index('ix_trades_ticker', table_name='trades')
-    op.drop_index('ix_trades_id', table_name='trades')
-    op.drop_column('trades', 'quantity')
-
     op.drop_table('trade_exit_notes')
     op.drop_table('trade_events')
     op.drop_table('trade_entry_notes')
     op.drop_table('execution_matches')
     op.drop_table('executions')
+    op.drop_column('trades', 'quantity')
