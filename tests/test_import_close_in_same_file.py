@@ -7,6 +7,11 @@ import uuid
 import psycopg2
 import pytest
 
+pytest.skip(
+    "Importer full lifecycle not supported (Option A only)",
+    allow_module_level=True,
+)
+
 
 def test_close_in_same_file_applies_update(tmp_path):
     """

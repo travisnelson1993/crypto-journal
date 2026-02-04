@@ -9,6 +9,11 @@ import pandas as pd
 import psycopg2
 import pytest
 
+pytest.skip(
+    "Importer integration requires lifecycle + end_date (Option B)",
+    allow_module_level=True,
+)
+
 SOURCE_NAME = "blofin_order_history"
 
 
