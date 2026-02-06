@@ -11,6 +11,17 @@ async def compute_daily_max_loss(
     max_daily_loss_usd: float = 100.0,
     eligible_only: bool = False,
 ) -> dict:
+    """
+    CATEGORY 4 — Risk Governance (Advisory Only)
+
+    Computes daily realized PnL and emits an advisory warning if the
+    configured daily loss threshold is exceeded.
+
+    ❌ No enforcement
+    ❌ No trade blocking
+    ❌ No permission flags
+    """
+
     today = datetime.utcnow().date()
 
     stmt = (
@@ -50,15 +61,22 @@ async def compute_daily_max_loss(
             "realized_pnl": pnl_f,
         })
 
-    trading_halted = daily_pnl <= -abs(max_daily_loss_usd)
+    daily_loss_exceeded = daily_pnl <= -abs(max_daily_loss_usd)
 
     return {
         "date": today.isoformat(),
         "daily_pnl": round(daily_pnl, 2),
         "max_daily_loss_usd": round(max_daily_loss_usd, 2),
-        "trading_halted": trading_halted,
-        "halt_reason": (
-            "Daily loss limit exceeded" if trading_halted else None
+        "daily_loss_exceeded": daily_loss_exceeded,
+        "warning": (
+            {
+                "type": "DAILY_MAX_LOSS_EXCEEDED",
+                "severity": "HIGH",
+                "message": "Daily loss exceeded configured maximum.",
+                "confidence": 0.9,
+            }
+            if daily_loss_exceeded
+            else None
         ),
         "trades": trades,
     }
