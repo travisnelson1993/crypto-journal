@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import List
 
-from sqlalchemy import delete, select, func
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trade import Trade
@@ -49,7 +50,7 @@ async def rebuild_trade_lifecycle_events(session: AsyncSession) -> int:
             )
         )
 
-        # 2️⃣ Pull execution matches for this trade (by open_execution_id)
+        # 2️⃣ Pull execution matches for this trade
         matches = (
             await session.execute(
                 select(ExecutionMatch)
@@ -58,8 +59,8 @@ async def rebuild_trade_lifecycle_events(session: AsyncSession) -> int:
             )
         ).scalars().all()
 
+        # ── Fallback: summary-only close
         if not matches:
-            # fallback close if trade summary says so
             if trade.exit_price is not None:
                 lifecycle_rows.append(
                     TradeLifecycleEvent(
@@ -68,6 +69,11 @@ async def rebuild_trade_lifecycle_events(session: AsyncSession) -> int:
                         created_at=trade.created_at,
                     )
                 )
+
+                # 🔑 Option B: persist trade closure
+                if trade.end_date is None:
+                    trade.end_date = trade.created_at
+
             continue
 
         original_qty = Decimal(str(trade.original_quantity))
@@ -84,7 +90,7 @@ async def rebuild_trade_lifecycle_events(session: AsyncSession) -> int:
             if remaining < 0:
                 remaining = Decimal("0")
 
-            # PARTIAL CLOSE
+            # ── PARTIAL CLOSE
             if before > remaining and remaining > 0:
                 lifecycle_rows.append(
                     TradeLifecycleEvent(
@@ -94,7 +100,7 @@ async def rebuild_trade_lifecycle_events(session: AsyncSession) -> int:
                     )
                 )
 
-            # FINAL CLOSE (once)
+            # ── FINAL CLOSE (once)
             if before > 0 and remaining == 0 and not ever_closed:
                 lifecycle_rows.append(
                     TradeLifecycleEvent(
@@ -103,6 +109,11 @@ async def rebuild_trade_lifecycle_events(session: AsyncSession) -> int:
                         created_at=m.created_at,
                     )
                 )
+
+                # 🔑 Option B: persist trade closure
+                if trade.end_date is None:
+                    trade.end_date = m.created_at or datetime.utcnow()
+
                 ever_closed = True
 
     session.add_all(lifecycle_rows)

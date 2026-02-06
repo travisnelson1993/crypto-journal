@@ -3,14 +3,24 @@ import shutil
 import subprocess
 import sys
 import uuid
+from decimal import Decimal
 
 import psycopg2
 import pytest
 
-pytest.skip(
-    "Importer full lifecycle not supported (Option A only)",
-    allow_module_level=True,
-)
+
+def _has_column(conn, table: str, column: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = %s AND column_name = %s
+            LIMIT 1
+            """,
+            (table, column),
+        )
+        return cur.fetchone() is not None
 
 
 def test_close_in_same_file_applies_update(tmp_path):
@@ -27,9 +37,19 @@ def test_close_in_same_file_applies_update(tmp_path):
     # --- Clean DB ---
     conn = psycopg2.connect(dsn)
     try:
+        has_source = _has_column(conn, "trades", "source")
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM trades WHERE source = %s", ("blofin_order_history",))
-            cur.execute("DELETE FROM imported_files")  # clear hash idempotency
+            if has_source:
+                cur.execute(
+                    "DELETE FROM trades WHERE source = %s",
+                    ("blofin_order_history",),
+                )
+            else:
+                # Fallback: only delete BTCUSDT if no source column exists
+                cur.execute("DELETE FROM trades WHERE ticker = %s", ("BTCUSDT",))
+
+            # imported_files table is part of importer idempotency
+            cur.execute("DELETE FROM imported_files")
         conn.commit()
     finally:
         conn.close()
@@ -58,22 +78,38 @@ def test_close_in_same_file_applies_update(tmp_path):
     # --- Verify CLOSED trade exists ---
     conn = psycopg2.connect(dsn)
     try:
+        has_source = _has_column(conn, "trades", "source")
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT exit_price, end_date
-                FROM trades
-                WHERE ticker = %s
-                  AND source = %s
-                  AND end_date IS NOT NULL
-                """,
-                ("BTCUSDT", "blofin_order_history"),
-            )
+            if has_source:
+                cur.execute(
+                    """
+                    SELECT exit_price, end_date
+                    FROM trades
+                    WHERE ticker = %s
+                      AND source = %s
+                      AND end_date IS NOT NULL
+                    """,
+                    ("BTCUSDT", "blofin_order_history"),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT exit_price, end_date
+                    FROM trades
+                    WHERE ticker = %s
+                      AND end_date IS NOT NULL
+                    """,
+                    ("BTCUSDT",),
+                )
+
             row = cur.fetchone()
             assert row is not None, "Expected a closed BTCUSDT trade"
 
             exit_price, end_date = row
-            assert exit_price == 87518.4
+
+            # psycopg2 may return Decimal for NUMERIC
+            assert Decimal(str(exit_price)) == Decimal("87518.4")
             assert end_date is not None
     finally:
         conn.close()
+

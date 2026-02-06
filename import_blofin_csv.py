@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 """
-Import Blofin CSV(s).
+Blofin CSV Importer — Option B (Trades + Executions)
 
-Option A (recommended right now):
-  --executions-only  -> writes ONLY to executions + imported_files
-
-CI-SAFE / TRANSACTION-SAFE
---------------------------
-✔ NO ON CONFLICT
-✔ NO savepoints
-✔ NO autocommit toggling on active connections
-✔ DDL runs in a dedicated connection
-✔ Each CSV row runs in its own transaction
-✔ imported_files tracked by SHA-256
+✔ Creates trades on OPEN
+✔ Updates existing open trade on CLOSE (same file or later)
+✔ Sets exit_price + end_date
+✔ Records source + source_filename
+✔ imported_files idempotency via SHA-256
+✔ SAFE: no ON CONFLICT, no savepoints
 """
 
 import argparse
@@ -20,7 +15,6 @@ import glob
 import hashlib
 import os
 import shutil
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -33,15 +27,7 @@ SOURCE_NAME = "blofin_order_history"
 
 # ───────────────────────── helpers ─────────────────────────
 
-def normalize_psycopg2_dsn(dsn: str) -> str:
-    """
-    psycopg2 does NOT accept SQLAlchemy async URLs like:
-      postgresql+asyncpg://...
-    Convert to:
-      postgresql://...
-    """
-    if not dsn:
-        return dsn
+def normalize_dsn(dsn: str) -> str:
     if dsn.startswith("postgresql+asyncpg://"):
         return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
     return dsn
@@ -55,39 +41,54 @@ def file_sha256(path: str) -> str:
     return h.hexdigest()
 
 
-def parse_price(s):
-    if s is None:
-        return None
-    if not isinstance(s, str):
-        try:
-            return float(s)
-        except Exception:
-            return None
-
-    s = s.strip()
-    if s in ("", "--", "Market"):
-        return None
-
-    import re
-    m = re.match(r"([0-9\.\-eE]+)", s)
-    if not m:
+def parse_price_numeric(val):
+    """
+    Handles Blofin values like:
+      '3.192 USDT'
+      '0.29896 USDT'
+      '85711.3'
+    """
+    if val is None:
         return None
     try:
-        return float(m.group(1))
+        s = str(val).strip()
+        if not s:
+            return None
+        # If it has a unit like "USDT", take first token
+        num = s.split()[0]
+        return float(num)
     except Exception:
         return None
 
 
-def parse_datetime(s, tz=None):
+def parse_quantity(val):
+    """
+    Handles Blofin values like:
+      "100 ICP"
+      "2500 TRX"
+      "30 LIT"
+      "0.01 BTC"
+    """
+    if val is None:
+        return None
     try:
-        dt = pd.to_datetime(s, errors="coerce")
+        s = str(val).strip()
+        if not s:
+            return None
+        num = s.split()[0]
+        return float(num)
+    except Exception:
+        return None
+
+
+def parse_datetime(val, tz=None):
+    try:
+        dt = pd.to_datetime(val, errors="coerce")
         if pd.isna(dt):
             return None
         ts = dt.to_pydatetime()
         if tz:
             ts = ts.replace(tzinfo=ZoneInfo(tz)).astimezone(ZoneInfo("UTC"))
-            return ts  # tz-aware UTC
-        # if no tz passed, return tz-aware UTC if it already has tz; else naive
         return ts
     except Exception:
         return None
@@ -96,17 +97,14 @@ def parse_datetime(s, tz=None):
 def pick_first(row, *keys):
     for k in keys:
         v = row.get(k)
-        if v is not None and str(v).strip() != "":
+        if v not in (None, "", "--"):
             return v
     return None
 
 
 # ───────────────────── DDL (DEDICATED CONNECTION) ─────────────────────
 
-def ensure_imported_files_table_dedicated(dsn: str):
-    """
-    Run DDL in a short-lived, dedicated connection.
-    """
+def ensure_imported_files_table(dsn: str):
     with psycopg2.connect(dsn) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
@@ -124,164 +122,124 @@ def ensure_imported_files_table_dedicated(dsn: str):
 
 # ───────────────────────── core ─────────────────────────
 
-def process_file(
-    conn,
-    dsn,
-    file_path,
-    tz=None,
-    archive_dir=None,
-    dry_run=False,
-    executions_only=False,
-):
+def process_file(conn, dsn, file_path, tz=None, archive_dir=None):
     print(f"Processing: {file_path}")
+
     basename = os.path.basename(file_path)
     file_hash = file_sha256(file_path)
 
-    # Ensure imported_files table exists
-    ensure_imported_files_table_dedicated(dsn)
+    ensure_imported_files_table(dsn)
 
-    # Skip already imported file
+    # --- idempotency ---
     with conn.cursor() as cur:
         cur.execute("SELECT 1 FROM imported_files WHERE file_hash = %s", (file_hash,))
         if cur.fetchone():
-            print("  -> already imported (hash match). Skipping.")
+            print("  -> already imported, skipping")
             return
 
     df = pd.read_csv(file_path, dtype=str)
     df.columns = [c.strip() for c in df.columns]
 
-    inserted_rows = 0
-    failed_rows = 0
-
-    for i, row in df.iterrows():
-        ticker = pick_first(
-            row,
-            "Underlying Asset",
-            "Ticker",
-            "symbol",
-            "Instrument",
-        )
+    for _, row in df.iterrows():
+        ticker = pick_first(row, "Underlying Asset", "Ticker", "symbol")
         if not ticker:
             continue
-        ticker = str(ticker).strip()
 
-        side_raw = str(row.get("Side", "") or "")
+        side_raw = row.get("Side")
         action, direction, _ = infer_action_and_direction(side_raw)
-        if not action or not direction:
-            # if side parsing fails, skip the row
+        if not action:
             continue
 
-        # executions.side enum expects: OPEN/CLOSE
-        exec_side = "OPEN" if action == "OPEN" else "CLOSE"
-        # executions.direction enum expects: LONG/SHORT
-        exec_direction = "LONG" if direction.upper() == "LONG" else "SHORT"
+        price = parse_price_numeric(pick_first(row, "Avg Fill", "Price"))
+        qty = parse_quantity(pick_first(row, "Filled", "Quantity"))
+        ts = parse_datetime(pick_first(row, "Order Time", "Time"), tz)
 
-        # price in executions = avg fill (best available from BloFin file)
-        price = parse_price(pick_first(row, "Avg Fill", "Avg fill", "AvgFill", "Price"))
-
-        # quantity in executions = filled quantity
-        qty = parse_price(pick_first(row, "Filled", "Fill", "Executed", "Quantity", "Qty"))
-        if qty is None:
-            # if we can't parse quantity, skip
-            continue
-
-        # fee
-        fee = parse_price(pick_first(row, "Fee", "Trading Fee", "Commission"))
-
-        # timestamp
-        ts = parse_datetime(pick_first(row, "Order Time", "Time", "Timestamp"), tz=tz)
+        # timestamp is always required
         if ts is None:
             continue
 
-        created_at = datetime.utcnow()
+        # Quantity is required for OPEN (but if missing, default to 0 rather than crash)
+        if action == "OPEN" and qty is None:
+            qty = 0.0
 
         try:
             with conn.cursor() as cur:
-                if executions_only:
-                    # IMPORTANT: no trades writes at all
+                if action == "OPEN":
                     cur.execute(
                         """
-                        INSERT INTO executions
-                        (source, source_filename, ticker, side, direction,
-                         price, quantity, remaining_qty, timestamp, fee, created_at)
-                        SELECT %s,%s,%s,%s,%s,
-                               %s,%s,%s,%s,%s,%s
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM executions
-                            WHERE source=%s
-                              AND source_filename=%s
-                              AND ticker=%s
-                              AND side=%s
-                              AND direction=%s
-                              AND price=%s
-                              AND quantity=%s
-                              AND timestamp=%s
+                        INSERT INTO trades (
+                            ticker,
+                            direction,
+                            quantity,
+                            original_quantity,
+                            entry_price,
+                            created_at,
+                            source,
+                            source_filename
                         )
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                         """,
                         (
+                            ticker,
+                            (direction or "").upper(),
+                            qty,
+                            qty,
+                            price,
+                            ts,
                             SOURCE_NAME,
                             basename,
-                            ticker,
-                            exec_side,
-                            exec_direction,
-                            price,
-                            qty,
-                            qty,   # remaining_qty starts full for BOTH open and close legs
-                            ts,
-                            fee,
-                            created_at,
-                            # dedupe keys
-                            SOURCE_NAME,
-                            basename,
-                            ticker,
-                            exec_side,
-                            exec_direction,
-                            price,
-                            qty,
-                            ts,
                         ),
                     )
-                else:
-                    raise RuntimeError(
-                        "This script is currently locked to Option A. "
-                        "Run with --executions-only."
+
+                elif action == "CLOSE":
+                    # Close exactly one open trade for this ticker (oldest first).
+                    # Postgres-safe LIMIT via subquery.
+                    cur.execute(
+                        """
+                        UPDATE trades
+                        SET exit_price = %s,
+                            end_date = %s
+                        WHERE id = (
+                            SELECT id
+                            FROM trades
+                            WHERE ticker = %s
+                              AND end_date IS NULL
+                            ORDER BY created_at
+                            LIMIT 1
+                        )
+                        """,
+                        (price, ts, ticker),
                     )
 
-            if dry_run:
-                conn.rollback()
-            else:
-                conn.commit()
-
-            inserted_rows += 1
+            conn.commit()
 
         except Exception as e:
-            failed_rows += 1
             conn.rollback()
-            print(f"  -> row {i} failed, rolled back: {e}")
-            continue
+            print(f"  -> row failed: {e}")
 
-    # Record file hash
-    if not dry_run:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO imported_files (filename, file_hash) VALUES (%s, %s)",
-                (basename, file_hash),
-            )
-        conn.commit()
+    # record imported file
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO imported_files (filename, file_hash) VALUES (%s,%s)",
+            (basename, file_hash),
+        )
+    conn.commit()
 
-        print(f"  -> file import committed ({inserted_rows} rows, {failed_rows} failed)")
-
-        if archive_dir:
-            os.makedirs(archive_dir, exist_ok=True)
-            shutil.move(file_path, os.path.join(archive_dir, basename))
+    # Archive only if archive_dir is different than the file's current directory
+    if archive_dir:
+        src_dir = os.path.abspath(os.path.dirname(file_path))
+        dst_dir = os.path.abspath(archive_dir)
+        if src_dir != dst_dir:
+            os.makedirs(dst_dir, exist_ok=True)
+            shutil.move(file_path, os.path.join(dst_dir, basename))
 
 
 # ───────────────────────── main ─────────────────────────
 
-def gather_input_paths(input_arg):
-    if os.path.isdir(input_arg):
-        return sorted(glob.glob(os.path.join(input_arg, "*.csv")))
-    return sorted(glob.glob(input_arg))
+def gather_inputs(path):
+    if os.path.isdir(path):
+        return sorted(glob.glob(os.path.join(path, "*.csv")))
+    return sorted(glob.glob(path))
 
 
 def main():
@@ -289,37 +247,22 @@ def main():
     p.add_argument("--input", "-i", required=True)
     p.add_argument("--db", "-d", default=None)
     p.add_argument("--archive-dir", "-a", default=None)
-    p.add_argument("--tz", "-t", default=None)
-    p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--executions-only", action="store_true")
+    p.add_argument("--tz", default=None)
     args = p.parse_args()
 
-    dsn = args.db or os.getenv("CRYPTO_JOURNAL_DSN")
+    dsn = normalize_dsn(args.db or os.getenv("CRYPTO_JOURNAL_DSN"))
     if not dsn:
         raise SystemExit("CRYPTO_JOURNAL_DSN not set")
 
-    dsn = normalize_psycopg2_dsn(dsn)
-
-    if not args.executions_only:
-        raise SystemExit("For now, run with --executions-only (Option A).")
-
-    paths = gather_input_paths(args.input)
+    paths = gather_inputs(args.input)
     if not paths:
-        print("No CSV files found.")
+        print("No CSV files found")
         return
 
     conn = psycopg2.connect(dsn)
     try:
         for path in paths:
-            process_file(
-                conn,
-                dsn,
-                path,
-                tz=args.tz,
-                archive_dir=args.archive_dir,
-                dry_run=args.dry_run,
-                executions_only=args.executions_only,
-            )
+            process_file(conn, dsn, path, tz=args.tz, archive_dir=args.archive_dir)
     finally:
         conn.close()
 

@@ -9,6 +9,7 @@ from sqlalchemy import (
     String,
     Numeric,
     func,
+    JSON,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.mutable import MutableDict
@@ -74,14 +75,19 @@ class Trade(Base):
     )
 
     # -------------------------------------------------
-    # Advisory & planning
+    # Advisory & planning (portable JSON)
     # -------------------------------------------------
     risk_warnings: Mapped[Optional[dict]] = mapped_column(
-        MutableDict.as_mutable(JSONB),
+        MutableDict.as_mutable(
+            JSONB().with_variant(JSON, "sqlite")
+        ),
         nullable=True,
     )
+
     trade_plan: Mapped[Optional[dict]] = mapped_column(
-        MutableDict.as_mutable(JSONB),
+        MutableDict.as_mutable(
+            JSONB().with_variant(JSON, "sqlite")
+        ),
         nullable=True,
     )
 
@@ -94,9 +100,15 @@ class Trade(Base):
         nullable=False,
     )
 
+    end_date: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     # -------------------------------------------------
     # Quality-of-life helpers
     # -------------------------------------------------
     @property
     def has_risk_warnings(self) -> bool:
         return bool(self.risk_warnings)
+

@@ -20,17 +20,23 @@ _engine: AsyncEngine | None = None
 AsyncSessionLocal: async_sessionmaker[AsyncSession] | None = None
 
 
+# -------------------------------------------------
+# Engine
+# -------------------------------------------------
 def get_async_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         _engine = create_async_engine(
             DATABASE_URL,
             pool_pre_ping=True,
-            echo=True,  # 👈 ADD THIS
+            echo=True,  # keep on during dev
         )
     return _engine
 
 
+# -------------------------------------------------
+# Sessionmaker
+# -------------------------------------------------
 def get_async_sessionmaker() -> async_sessionmaker[AsyncSession]:
     global AsyncSessionLocal
     if AsyncSessionLocal is None:
@@ -42,8 +48,20 @@ def get_async_sessionmaker() -> async_sessionmaker[AsyncSession]:
     return AsyncSessionLocal
 
 
-# ✅ FastAPI dependency (THIS is what was missing)
+# -------------------------------------------------
+# FastAPI dependency (canonical)
+# -------------------------------------------------
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     sessionmaker = get_async_sessionmaker()
     async with sessionmaker() as session:
+        yield session
+
+
+# -------------------------------------------------
+# 🔁 Compatibility alias (DO NOT REMOVE YET)
+# -------------------------------------------------
+# Some routers import `get_async_session`
+# This keeps everything working without refactors
+async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
+    async for session in get_db():
         yield session

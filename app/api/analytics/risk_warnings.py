@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
@@ -21,7 +21,12 @@ async def risk_warning_summary(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(
             func.count(Trade.id).label("total_trades"),
-            func.count(Trade.risk_warnings).label("trades_with_warnings"),
+            func.sum(
+                case(
+                    (func.jsonb_array_length(Trade.risk_warnings) > 0, 1),
+                    else_=0,
+                )
+            ).label("trades_with_warnings"),
         )
     )
 
@@ -34,4 +39,5 @@ async def risk_warning_summary(db: AsyncSession = Depends(get_db)):
         "total_trades": total,
         "trades_with_warnings": warned,
         "warning_rate": round((warned / total), 4) if total else 0.0,
+        "enforcement": False,
     }

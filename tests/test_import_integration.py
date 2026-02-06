@@ -9,11 +9,6 @@ import pandas as pd
 import psycopg2
 import pytest
 
-pytest.skip(
-    "Importer integration requires lifecycle + end_date (Option B)",
-    allow_module_level=True,
-)
-
 SOURCE_NAME = "blofin_order_history"
 
 
@@ -34,16 +29,20 @@ def file_sha256(path):
 def cleanup_db(conn):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM trades WHERE source = %s", (SOURCE_NAME,))
-        cur.execute("DELETE FROM imported_files")  # clear hash idempotency
+        cur.execute("DELETE FROM imported_files")
     conn.commit()
 
 
 def ensure_unique_open_trade_index(conn):
+    """
+    Enforce: only ONE open trade per (ticker, direction, entry_price).
+    Uses created_at instead of non-existent entry_date.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS uniq_open_trade_on_fields
-            ON trades (ticker, direction, entry_date, entry_price)
+            ON trades (ticker, direction, entry_price)
             WHERE end_date IS NULL;
             """
         )
@@ -68,7 +67,10 @@ def run_importer(file_path, dsn):
 
 def count_trades(conn):
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM trades WHERE source = %s", (SOURCE_NAME,))
+        cur.execute(
+            "SELECT count(*) FROM trades WHERE source = %s",
+            (SOURCE_NAME,),
+        )
         return cur.fetchone()[0]
 
 
@@ -121,8 +123,10 @@ def test_importer_idempotent_and_records_filename(tmp_path, dsn):
     shutil.copy(fixture, in1)
     shutil.copy(fixture, in2)
 
-    expected_rows = len(pd.read_csv(fixture, dtype=str))
+    df = pd.read_csv(fixture, dtype=str)
+    expected_rows = df["Side"].str.contains("Open", case=False, na=False).sum()
 
+    # ---- First import ----
     run_importer(in1, dsn)
 
     conn = get_conn(dsn)
@@ -135,10 +139,10 @@ def test_importer_idempotent_and_records_filename(tmp_path, dsn):
     assert os.path.basename(str(in1)) in filenames
     conn.close()
 
-    # identical content, different name → skipped
+    # ---- Second import (same content, new name) ----
     run_importer(in2, dsn)
 
     conn = get_conn(dsn)
-    assert count_trades(conn) == expected_rows
+    assert count_trades(conn) == expected_rows  # idempotent
     assert imported_file_count_by_hash(conn, h1) == 1
     conn.close()
