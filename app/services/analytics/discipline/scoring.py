@@ -1,5 +1,21 @@
 from typing import List, Dict, Any
 
+from app.services.analytics.discipline.patterns import detect_behavioral_patterns
+
+
+PATTERN_PENALTIES = {
+    "IMPULSIVE_ENTRY": {
+        "category": "Behavioral",
+        "reason": "Impulsive / unplanned entry",
+        "points": -10,
+    },
+    "REVENGE_TRADING": {
+        "category": "Behavioral",
+        "reason": "Revenge trading behavior detected",
+        "points": -15,
+    },
+}
+
 
 async def compute_discipline_score(
     *,
@@ -96,6 +112,30 @@ async def compute_discipline_score(
             "points": -20,
         })
         score -= 20
+
+    # -------------------------------------------------
+    # Behavioral pattern analysis (secondary penalties)
+    # -------------------------------------------------
+    patterns = await detect_behavioral_patterns(
+        risk_warnings=risk_warnings,
+        entry_intent=entry_intent,
+        loss_streaks=loss_streaks,
+        daily_max_loss=daily_max_loss,
+    )
+
+    for pattern in patterns:
+        config = PATTERN_PENALTIES.get(pattern["type"])
+        if not config:
+            continue
+
+        penalties.append({
+            "category": config["category"],
+            "reason": config["reason"],
+            "points": config["points"],
+            "evidence": pattern.get("evidence", []),
+        })
+
+        score += config["points"]  # points are negative
 
     # -------------------------------------------------
     # Clamp score
