@@ -17,9 +17,13 @@ from app.api import risk as risk_router
 from app.api.analytics.summary import router as analytics_summary_router
 from app.api.analytics.risk_warnings import router as risk_warnings_router
 from app.api.analytics.discipline import router as discipline_router
+from app.api.analytics.discipline_history import router as discipline_history_router
 
 from app.api.journal import daily_router, trade_notes_router
 from app.api.debug import router as debug_router
+from app.api.analytics.discipline_correlation import (
+    router as discipline_correlation_router,
+)
 
 # -------------------------------------------------
 # App
@@ -54,6 +58,8 @@ app.include_router(imports_router.router)
 app.include_router(analytics_summary_router)
 app.include_router(risk_warnings_router)
 app.include_router(discipline_router)
+app.include_router(discipline_history_router)
+app.include_router(discipline_correlation_router)
 
 # -------------------------------------------------
 # Risk / Controls

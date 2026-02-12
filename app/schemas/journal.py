@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from app.models.journal import TradeNoteType
 
 
@@ -46,8 +46,8 @@ class DailyJournalCreate(BaseModel):
 class DailyJournalOut(DailyJournalCreate):
     id: int
 
-    class Config:
-        from_attributes = True
+    # ✅ Pydantic v2 replacement
+    model_config = ConfigDict(from_attributes=True)
 
 
 # -------------------------
@@ -65,5 +65,5 @@ class TradeNoteOut(BaseModel):
     content: str | None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    # ✅ Pydantic v2 replacement
+    model_config = ConfigDict(from_attributes=True)
