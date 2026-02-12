@@ -18,12 +18,15 @@ from app.api.analytics.summary import router as analytics_summary_router
 from app.api.analytics.risk_warnings import router as risk_warnings_router
 from app.api.analytics.discipline import router as discipline_router
 from app.api.analytics.discipline_history import router as discipline_history_router
-
-from app.api.journal import daily_router, trade_notes_router
-from app.api.debug import router as debug_router
 from app.api.analytics.discipline_correlation import (
     router as discipline_correlation_router,
 )
+from app.api.analytics.monthly_performance import (
+    router as monthly_performance_router,
+)
+
+from app.api.journal import daily_router, trade_notes_router
+from app.api.debug import router as debug_router
 
 # -------------------------------------------------
 # App
@@ -61,6 +64,9 @@ app.include_router(discipline_router)
 app.include_router(discipline_history_router)
 app.include_router(discipline_correlation_router)
 
+# ADD THIS:
+app.include_router(monthly_performance_router)
+
 # -------------------------------------------------
 # Risk / Controls
 # -------------------------------------------------
@@ -83,5 +89,4 @@ app.include_router(debug_router)
 @app.get("/health", tags=["System"])
 async def health_check():
     return {"status": "ok"}
-
 
