@@ -10,5 +10,3 @@ from app.models.journal import DailyJournalEntry, TradeNote
 from app.models.trade_mindset_tag import TradeMindsetTag
 from app.models.trade_lifecycle_event import TradeLifecycleEvent
 
-# 🧠 Discipline analytics
-from app.models.discipline_snapshot import DisciplineSnapshot  # noqa: F401
