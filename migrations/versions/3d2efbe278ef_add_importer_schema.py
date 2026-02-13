@@ -1,7 +1,7 @@
 """add importer schema
 
 Revision ID: 3d2efbe278ef
-Revises: b9b7f671cdfa
+Revises: 6f0b4ca0dfac
 Create Date: 2026-02-13
 """
 
@@ -16,7 +16,7 @@ depends_on = None
 
 def upgrade():
 
-    # Add source column if missing
+    # Add source column to trades if missing
     op.execute("""
     DO $$
     BEGIN
@@ -29,7 +29,7 @@ def upgrade():
     END$$;
     """)
 
-    # Add source_filename column if missing
+    # Add source_filename column to trades if missing
     op.execute("""
     DO $$
     BEGIN
@@ -42,11 +42,10 @@ def upgrade():
     END$$;
     """)
 
-    # Create imported_files table with file_hash
+    # Create imported_files table (NO source column)
     op.execute("""
     CREATE TABLE IF NOT EXISTS imported_files (
         id SERIAL PRIMARY KEY,
-        source VARCHAR NOT NULL,
         filename VARCHAR NOT NULL,
         file_hash VARCHAR NOT NULL,
         imported_at TIMESTAMPTZ DEFAULT now(),
