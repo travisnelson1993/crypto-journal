@@ -17,11 +17,24 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column(
-        "trades",
-        sa.Column("source_filename", sa.Text(), nullable=True),
-    )
+    op.execute("""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name='trades'
+            AND column_name='source_filename'
+        ) THEN
+            ALTER TABLE trades ADD COLUMN source_filename TEXT;
+        END IF;
+    END$$;
+    """)
 
 
 def downgrade():
-    op.drop_column("trades", "source_filename")
+    op.execute("""
+    ALTER TABLE trades
+    DROP COLUMN IF EXISTS source_filename;
+    """)
+
