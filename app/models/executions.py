@@ -1,11 +1,25 @@
 ﻿from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, Numeric, String
 from sqlalchemy.sql import func
+from sqlalchemy import UniqueConstraint
 
 from app.db.database import Base
 
 
 class Execution(Base):
     __tablename__ = "executions"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "source_filename",
+            "ticker",
+            "side",
+            "direction",
+            "price",
+            "quantity",
+            "timestamp",
+            name="uq_execution_dedupe",
+        ),
+    )
 
     id = Column(Integer, primary_key=True)
     source = Column(String, nullable=False)

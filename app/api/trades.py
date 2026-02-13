@@ -1,198 +1,318 @@
-import csv
-import io
-import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from decimal import Decimal
+from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from sqlalchemy import delete, select
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.database import get_async_sessionmaker
+from app.db.database import get_db
 from app.models.trade import Trade
-
-# Router
-router = APIRouter(prefix="/api/import", tags=["imports"])
-
-# ---------------- DB dependency (ASYNC) ----------------
-
-async def get_db():
-    SessionLocal = get_async_sessionmaker()
-    async with SessionLocal() as session:
-        yield session
+from app.services.trade_close import close_trade
+from app.services.analytics.position_sizing import position_sizing
+from app.risk.advisories import compute_risk_advisories
+from app.schemas.trade_plan import TradePlanUpdate
 
 
-# ---------------- helpers ----------------
-
-_qty_re = re.compile(r"([+-]?[0-9,]*\.?[0-9]+)")
-
-
-def parse_money(value: Optional[str]) -> Optional[float]:
-    if value is None:
-        return None
-    v = str(value).strip()
-    if v in ("", "--", "-"):
-        return None
-
-    v = v.replace("%", "").strip()
-    v = re.sub(r"[A-Za-z]+$", "", v).strip()  # remove trailing units like "USDT"
-    v = v.replace(",", "")
-
-    if v.startswith("(") and v.endswith(")"):
-        v = "-" + v[1:-1]
-
-    try:
-        return float(v)
-    except Exception:
-        m = _qty_re.search(v)
-        if m:
-            try:
-                return float(m.group(1))
-            except Exception:
-                return None
-        return None
+# -------------------------------------------------
+# Trades Router
+# -------------------------------------------------
+router = APIRouter(prefix="/api/trades", tags=["trades"])
 
 
-def parse_datetime(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    value = value.strip()
-    for fmt in ("%m/%d/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y"):
-        try:
-            return datetime.strptime(value, fmt)
-        except Exception:
-            pass
-    return None
+# =================================================
+# OPEN TRADE (ENTRY) — SOFT ADVISORIES ONLY
+# =================================================
+class OpenTradeRequest(BaseModel):
+    ticker: str
+    direction: str  # long / short
+    entry_price: Decimal = Field(..., gt=Decimal("0"))
+    quantity: Decimal = Field(..., gt=Decimal("0"))
+    leverage: Optional[float] = 1.0
+    entry_summary: Optional[str] = None
+    source: Optional[str] = None
 
 
-def heuristic_from_side(side: Optional[str]):
-    if not side:
-        return None, None, None
-    s = str(side).strip().lower()
-
-    action = None
-    if s.startswith("open") or " open" in s:
-        action = "OPEN"
-    elif s.startswith("close") or " close" in s:
-        action = "CLOSE"
-
-    direction = None
-    if "long" in s:
-        direction = "LONG"
-    elif "short" in s:
-        direction = "SHORT"
-
-    reason = None
-    if "tp" in s or "take profit" in s:
-        reason = "TP"
-    elif "sl" in s or "stop" in s:
-        reason = "SL"
-
-    return action, direction, reason
-
-
-# ---------------- endpoint ----------------
-
-@router.post("/csv", status_code=status.HTTP_200_OK)
-async def import_csv(
-    file: UploadFile = File(...),
-    mode: str = Query("append", pattern="^(append|replace)$"),
+@router.post("")
+async def open_trade(
+    payload: OpenTradeRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+    """
+    Open a trade.
+    Advisory-only — never blocks execution.
+    """
 
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Empty CSV")
+    advisory = await position_sizing(db=db)
 
-    reader = csv.DictReader(io.StringIO(contents.decode(errors="replace")))
+    risk_warnings = None
 
-    if mode == "replace":
-        await db.execute(delete(Trade))
-        await db.commit()
+    if not advisory.get("trading_allowed", True):
+        risk_warnings = {
+            "entry_advisory": [
+                {
+                    "code": "POSITION_SIZING_REDUCED",
+                    "severity": "warning",
+                    "metric": "risk_pct",
+                    "allowed": advisory.get("allowed_risk_pct"),
+                    "actual": None,
+                    "message": advisory.get("notes"),
+                    "engine": "position_sizing_v1",
+                    "resolved": False,
+                }
+            ]
+        }
 
-    created = 0
-    closed = 0
-    orphan = 0
-    skipped = 0
-    skipped_examples: List[Dict[str, Any]] = []
+    trade = Trade(
+        ticker=payload.ticker,
+        direction=payload.direction,
+        entry_price=payload.entry_price,
+        quantity=payload.quantity,
+        original_quantity=payload.quantity,
+        leverage=payload.leverage or 1.0,
+        entry_date=datetime.utcnow(),
+        entry_summary=payload.entry_summary,
+        source=payload.source,
+        risk_warnings=risk_warnings,
+    )
 
-    for raw in reader:
-        action, direction, _ = heuristic_from_side(raw.get("Side") or raw.get("side"))
-        symbol = (
-            raw.get("Underlying Asset")
-            or raw.get("Ticker")
-            or raw.get("symbol")
-            or ""
-        ).strip()
-
-        if not action or not direction or not symbol:
-            skipped += 1
-            if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": "missing action/direction/symbol", "row": raw})
-            continue
-
-        entry_date = parse_datetime(raw.get("Order Time") or raw.get("Order Date"))
-        price = parse_money(raw.get("Avg Fill"))
-
-        if price is None:
-            skipped += 1
-            if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": "missing/invalid Avg Fill", "row": raw})
-            continue
-
-        if action == "OPEN":
-            db.add(
-                Trade(
-                    ticker=symbol,
-                    direction=direction,
-                    entry_price=price,
-                    entry_date=entry_date or datetime.utcnow(),
-                    source="blofin_order_history",
-                )
-            )
-            created += 1
-
-        else:  # CLOSE
-            result = await db.execute(
-                select(Trade)
-                .where(
-                    Trade.ticker == symbol,
-                    Trade.direction == direction,
-                    Trade.end_date.is_(None),
-                )
-                .order_by(Trade.entry_date.desc())
-                .limit(1)
-            )
-            open_trade = result.scalars().first()
-
-            if open_trade:
-                open_trade.exit_price = price
-                open_trade.end_date = entry_date or datetime.utcnow()
-                closed += 1
-            else:
-                db.add(
-                    Trade(
-                        ticker=symbol,
-                        direction=direction,
-                        entry_price=price,
-                        exit_price=price,
-                        entry_date=entry_date or datetime.utcnow(),
-                        end_date=entry_date or datetime.utcnow(),
-                        orphan_close=True,
-                        source="blofin_order_history",
-                    )
-                )
-                orphan += 1
-
+    db.add(trade)
     await db.commit()
+    await db.refresh(trade)
 
     return {
-        "ok": True,
-        "created_trades": created,
-        "closed_trades": closed,
-        "orphan_closes_created": orphan,
-        "skipped_rows": skipped,
-        "skipped_examples": skipped_examples,
+        "id": trade.id,
+        "ticker": trade.ticker,
+        "direction": trade.direction,
+        "entry_price": float(trade.entry_price),
+        "quantity": float(trade.quantity),
+        "leverage": float(trade.leverage),
+        "risk_warnings": trade.risk_warnings,
+        "note": "Trade opened successfully",
+    }
+
+
+# =================================================
+# READ SINGLE TRADE (SAFE SERIALIZATION)
+# =================================================
+@router.get("/{trade_id}")
+async def get_trade(
+    trade_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    trade = result.scalar_one_or_none()
+
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    return {
+        "id": trade.id,
+        "ticker": trade.ticker,
+        "direction": trade.direction,
+
+        "entry_price": (
+            float(trade.entry_price) if trade.entry_price is not None else None
+        ),
+
+        "quantity": (
+            float(trade.quantity)
+            if trade.quantity is not None
+            else float(trade.original_quantity)
+            if trade.original_quantity is not None
+            else None
+        ),
+
+        "original_quantity": (
+            float(trade.original_quantity)
+            if trade.original_quantity is not None
+            else None
+        ),
+
+        "leverage": float(trade.leverage),
+
+        "created_at": trade.created_at.isoformat(),
+
+        "stop_loss": (
+            float(trade.stop_loss) if trade.stop_loss is not None else None
+        ),
+
+        "fee": float(trade.fee) if trade.fee is not None else None,
+
+        "realized_pnl": (
+            float(trade.realized_pnl)
+            if trade.realized_pnl is not None
+            else None
+        ),
+
+        "realized_pnl_pct": (
+            float(trade.realized_pnl_pct)
+            if trade.realized_pnl_pct is not None
+            else None
+        ),
+
+        "risk_warnings": trade.risk_warnings,
+        "trade_plan": trade.trade_plan,
+    }
+
+
+# =================================================
+# CLOSE TRADE
+# =================================================
+class CloseTradeRequest(BaseModel):
+    exit_price: Decimal = Field(..., gt=Decimal("0"))
+    end_date: Optional[datetime] = None
+    fee: Optional[Decimal] = None
+
+
+@router.post("/{trade_id}/close")
+async def close_trade_endpoint(
+    trade_id: int,
+    payload: CloseTradeRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    trade = result.scalar_one_or_none()
+
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    if trade.end_date is not None:
+        raise HTTPException(status_code=400, detail="Trade already closed")
+
+    close_trade(
+        trade=trade,
+        exit_price=payload.exit_price,
+        closed_at=payload.end_date,
+        fee=payload.fee,
+    )
+
+    await db.commit()
+    await db.refresh(trade)
+
+    return {
+        "id": trade.id,
+        "ticker": trade.ticker,
+        "realized_pnl": float(trade.realized_pnl) if trade.realized_pnl is not None else None,
+        "realized_pnl_pct": (
+            float(trade.realized_pnl_pct)
+            if trade.realized_pnl_pct is not None
+            else None
+        ),
+    }
+
+
+# =================================================
+# PRE-TRADE PLAN (INTENT ONLY — Category 3 Option A)
+# =================================================
+@router.patch("/{trade_id}/plan")
+async def update_trade_plan(
+    trade_id: int,
+    payload: TradePlanUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    trade = result.scalar_one_or_none()
+
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    if trade.end_date is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot update plan on closed trade",
+        )
+
+    updates = payload.model_dump(exclude_unset=True)
+
+    if (
+        "planned_entry_price" in updates
+        and "planned_stop_price" in updates
+        and updates["planned_entry_price"] == updates["planned_stop_price"]
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="planned_entry_price and planned_stop_price cannot be equal",
+        )
+
+    trade.trade_plan = {
+        **(trade.trade_plan or {}),
+        **updates,
+    }
+
+    await db.commit()
+    await db.refresh(trade)
+
+    return {
+        "status": "ok",
+        "trade_id": trade.id,
+        "trade_plan": trade.trade_plan,
+    }
+
+
+# =================================================
+# EQUITY SNAPSHOT (IMMUTABLE)
+# =================================================
+class EquitySnapshotIn(BaseModel):
+    account_equity_at_entry: Decimal = Field(..., gt=Decimal("0"))
+    risk_usd_at_entry: Optional[Decimal] = Field(default=None, gt=Decimal("0"))
+
+
+@router.patch("/{trade_id}/equity-snapshot")
+async def set_equity_snapshot(
+    trade_id: int,
+    payload: EquitySnapshotIn,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    trade = result.scalar_one_or_none()
+
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    if trade.account_equity_at_entry is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Equity snapshot already set for this trade",
+        )
+
+    with db.no_autoflush:
+        equity = payload.account_equity_at_entry
+        trade.account_equity_at_entry = equity
+
+        risk_usd = payload.risk_usd_at_entry
+
+        if risk_usd is None and trade.stop_loss is not None:
+            risk_per_unit = (trade.entry_price - trade.stop_loss).copy_abs()
+            risk_usd = risk_per_unit * trade.original_quantity
+            if risk_usd == 0:
+                risk_usd = None
+
+        trade.risk_usd_at_entry = risk_usd
+        trade.risk_pct_at_entry = (risk_usd / equity) if risk_usd else None
+
+        warnings = compute_risk_advisories(trade)
+        trade.risk_warnings = warnings or trade.risk_warnings
+
+    await db.commit()
+    await db.refresh(trade)
+
+    return {
+        "id": trade.id,
+        "ticker": trade.ticker,
+        "account_equity_at_entry": float(trade.account_equity_at_entry),
+        "risk_usd_at_entry": (
+            float(trade.risk_usd_at_entry)
+            if trade.risk_usd_at_entry is not None
+            else None
+        ),
+        "risk_pct_at_entry": (
+            float(trade.risk_pct_at_entry)
+            if trade.risk_pct_at_entry is not None
+            else None
+        ),
+        "risk_warnings": trade.risk_warnings,
+        "note": "Equity snapshot stored (immutable)",
     }

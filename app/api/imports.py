@@ -2,101 +2,93 @@
 import io
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from decimal import Decimal
+from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from sqlalchemy import delete, select
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
-from app.db.database import get_async_sessionmaker
-from app.models.trade import Trade
+from app.db.database import get_db
+from app.models.executions import Execution
 
+# -------------------------------------------------
 # Router
+# -------------------------------------------------
 router = APIRouter(prefix="/api/import", tags=["imports"])
 
-# ---------------- DB dependency (ASYNC) ----------------
-
-async def get_db():
-    SessionLocal = get_async_sessionmaker()
-    async with SessionLocal() as session:
-        yield session
-
-
-# ---------------- helpers ----------------
-
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
 _qty_re = re.compile(r"([+-]?[0-9,]*\.?[0-9]+)")
 
 
-def parse_money(value: Optional[str]) -> Optional[float]:
+def parse_money(value: Optional[str]) -> Optional[Decimal]:
     if value is None:
         return None
-    v = str(value).strip()
+
+    v = str(value).strip().replace(",", "")
     if v in ("", "--", "-"):
         return None
 
-    v = v.replace("%", "").strip()
-    v = re.sub(r"[A-Za-z]+$", "", v).strip()  # remove trailing units like "USDT"
-    v = v.replace(",", "")
-
-    if v.startswith("(") and v.endswith(")"):
-        v = "-" + v[1:-1]
-
     try:
-        return float(v)
+        return Decimal(v)
     except Exception:
         m = _qty_re.search(v)
-        if m:
-            try:
-                return float(m.group(1))
-            except Exception:
-                return None
-        return None
+        return Decimal(m.group(1)) if m else None
 
 
 def parse_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
+
     value = value.strip()
-    for fmt in ("%m/%d/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y"):
+    for fmt in (
+        "%m/%d/%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%m/%d/%Y",
+    ):
         try:
             return datetime.strptime(value, fmt)
         except Exception:
             pass
+
     return None
 
 
-def heuristic_from_side(side: Optional[str]):
+def parse_side(side: Optional[str]):
+    """
+    BloFin Side examples:
+    - Open Long
+    - Close Long(SL)
+    - Open Short
+    - Close Short(TP)
+    """
     if not side:
-        return None, None, None
-    s = str(side).strip().lower()
+        return None, None
 
-    action = None
-    if s.startswith("open") or " open" in s:
-        action = "OPEN"
-    elif s.startswith("close") or " close" in s:
-        action = "CLOSE"
+    s = side.lower()
+    s = re.sub(r"\(.*?\)", "", s).strip()
 
-    direction = None
-    if "long" in s:
-        direction = "LONG"
-    elif "short" in s:
-        direction = "SHORT"
+    if s.startswith("open long"):
+        return "OPEN", "LONG"
+    if s.startswith("close long"):
+        return "CLOSE", "LONG"
+    if s.startswith("open short"):
+        return "OPEN", "SHORT"
+    if s.startswith("close short"):
+        return "CLOSE", "SHORT"
 
-    reason = None
-    if "tp" in s or "take profit" in s:
-        reason = "TP"
-    elif "sl" in s or "stop" in s:
-        reason = "SL"
-
-    return action, direction, reason
+    return None, None
 
 
-# ---------------- endpoint ----------------
-
+# -------------------------------------------------
+# CSV IMPORT (EXECUTION-ONLY LEDGER — v2 LOCKED)
+# -------------------------------------------------
 @router.post("/csv", status_code=status.HTTP_200_OK)
-async def import_csv(
+async def import_csv_v2(
     file: UploadFile = File(...),
-    mode: str = Query("append", pattern="^(append|replace)$"),
     db: AsyncSession = Depends(get_db),
 ):
     if not file.filename.lower().endswith(".csv"):
@@ -106,93 +98,66 @@ async def import_csv(
     if not contents:
         raise HTTPException(status_code=400, detail="Empty CSV")
 
-    reader = csv.DictReader(io.StringIO(contents.decode(errors="replace")))
+    rows = list(csv.DictReader(io.StringIO(contents.decode(errors="replace"))))
 
-    if mode == "replace":
-        await db.execute(delete(Trade))
-        await db.commit()
+    # FIFO-safe ordering
+    rows.sort(
+        key=lambda r: parse_datetime(r.get("Order Time") or r.get("Order Date"))
+        or datetime.min
+    )
 
-    created = 0
-    closed = 0
-    orphan = 0
-    skipped = 0
-    skipped_examples: List[Dict[str, Any]] = []
+    created = skipped = duplicates = 0
 
-    for raw in reader:
-        action, direction, _ = heuristic_from_side(raw.get("Side") or raw.get("side"))
-        symbol = (
-            raw.get("Underlying Asset")
-            or raw.get("Ticker")
-            or raw.get("symbol")
-            or ""
-        ).strip()
+    async with db.begin():  # ✅ ONE outer transaction
+        for raw in rows:
+            side, direction = parse_side(raw.get("Side"))
 
-        if not action or not direction or not symbol:
-            skipped += 1
-            if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": "missing action/direction/symbol", "row": raw})
-            continue
+            symbol = (
+                raw.get("Underlying Asset")
+                or raw.get("Ticker")
+                or raw.get("Symbol")
+                or ""
+            ).strip().upper()
 
-        entry_date = parse_datetime(raw.get("Order Time") or raw.get("Order Date"))
-        price = parse_money(raw.get("Avg Fill"))
+            if not side or not direction or not symbol:
+                skipped += 1
+                continue
 
-        if price is None:
-            skipped += 1
-            if len(skipped_examples) < 5:
-                skipped_examples.append({"reason": "missing/invalid Avg Fill", "row": raw})
-            continue
+            price = parse_money(raw.get("Avg Fill"))
+            qty = parse_money(raw.get("Filled"))
+            fee = parse_money(raw.get("Fee")) or Decimal("0")
+            ts = parse_datetime(raw.get("Order Time") or raw.get("Order Date"))
 
-        if action == "OPEN":
-            db.add(
-                Trade(
-                    ticker=symbol,
-                    direction=direction,
-                    entry_price=price,
-                    entry_date=entry_date or datetime.utcnow(),
-                    source="blofin_order_history",
-                )
+            if price is None or qty is None or qty <= 0 or ts is None:
+                skipped += 1
+                continue
+
+            execution = Execution(
+                source="blofin",
+                source_filename=file.filename,
+                ticker=symbol,
+                side=side,
+                direction=direction,
+                price=price,
+                quantity=qty,
+                remaining_qty=qty,  # ✅ FIX: applies to BOTH OPEN and CLOSE
+                timestamp=ts,
+                fee=fee,
             )
-            created += 1
 
-        else:  # CLOSE
-            result = await db.execute(
-                select(Trade)
-                .where(
-                    Trade.ticker == symbol,
-                    Trade.direction == direction,
-                    Trade.end_date.is_(None),
-                )
-                .order_by(Trade.entry_date.desc())
-                .limit(1)
-            )
-            open_trade = result.scalars().first()
-
-            if open_trade:
-                open_trade.exit_price = price
-                open_trade.end_date = entry_date or datetime.utcnow()
-                closed += 1
-            else:
-                db.add(
-                    Trade(
-                        ticker=symbol,
-                        direction=direction,
-                        entry_price=price,
-                        exit_price=price,
-                        entry_date=entry_date or datetime.utcnow(),
-                        end_date=entry_date or datetime.utcnow(),
-                        orphan_close=True,
-                        source="blofin_order_history",
-                    )
-                )
-                orphan += 1
-
-    await db.commit()
+            # 🔐 SAVEPOINT per execution
+            async with db.begin_nested():
+                try:
+                    db.add(execution)
+                    await db.flush()
+                    created += 1
+                except IntegrityError:
+                    duplicates += 1
+                    continue
 
     return {
         "ok": True,
-        "created_trades": created,
-        "closed_trades": closed,
-        "orphan_closes_created": orphan,
+        "created_executions": created,
+        "duplicate_executions": duplicates,
         "skipped_rows": skipped,
-        "skipped_examples": skipped_examples,
     }
