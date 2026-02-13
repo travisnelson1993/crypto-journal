@@ -15,13 +15,13 @@ depends_on = None
 
 
 def upgrade():
+
     # Add source column if missing
     op.execute("""
     DO $$
     BEGIN
         IF NOT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
+            SELECT 1 FROM information_schema.columns
             WHERE table_name='trades' AND column_name='source'
         ) THEN
             ALTER TABLE trades ADD COLUMN source VARCHAR;
@@ -34,8 +34,7 @@ def upgrade():
     DO $$
     BEGIN
         IF NOT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
+            SELECT 1 FROM information_schema.columns
             WHERE table_name='trades' AND column_name='source_filename'
         ) THEN
             ALTER TABLE trades ADD COLUMN source_filename VARCHAR;
@@ -43,14 +42,15 @@ def upgrade():
     END$$;
     """)
 
-    # Create imported_files table if missing
+    # Create imported_files table with file_hash
     op.execute("""
     CREATE TABLE IF NOT EXISTS imported_files (
         id SERIAL PRIMARY KEY,
         source VARCHAR NOT NULL,
         filename VARCHAR NOT NULL,
+        file_hash VARCHAR NOT NULL,
         imported_at TIMESTAMPTZ DEFAULT now(),
-        CONSTRAINT uq_imported_file UNIQUE (source, filename)
+        CONSTRAINT uq_imported_file_hash UNIQUE (file_hash)
     );
     """)
 
