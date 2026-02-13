@@ -1,5 +1,5 @@
 from datetime import date
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -17,24 +17,28 @@ async def persist_discipline_snapshot(
     penalties: List[Dict[str, Any]],
     patterns: List[Dict[str, Any]],
     coaching_flags: List[str],
-) -> DisciplineSnapshot:
+) -> Tuple[DisciplineSnapshot, str]:
     """
     Persist a daily discipline snapshot.
 
     - One snapshot per day (idempotent by snapshot_date)
     - Advisory only
     - Overwrites existing snapshot for the same date
+
+    Returns:
+        (snapshot, status)
+        status: "created" | "updated"
     """
 
     # -------------------------------------------------
     # Check for existing snapshot for the day
     # -------------------------------------------------
-    existing = (
-        await db.execute(
-            select(DisciplineSnapshot)
-            .where(DisciplineSnapshot.snapshot_date == snapshot_date)
+    result = await db.execute(
+        select(DisciplineSnapshot).where(
+            DisciplineSnapshot.snapshot_date == snapshot_date
         )
-    ).scalar_one_or_none()
+    )
+    existing = result.scalar_one_or_none()
 
     if existing:
         existing.discipline_score = discipline_score
@@ -46,7 +50,8 @@ async def persist_discipline_snapshot(
 
         await db.commit()
         await db.refresh(existing)
-        return existing
+
+        return existing, "updated"
 
     # -------------------------------------------------
     # Create new snapshot
@@ -65,6 +70,5 @@ async def persist_discipline_snapshot(
     await db.commit()
     await db.refresh(snapshot)
 
-    return snapshot
-
+    return snapshot, "created"
 
