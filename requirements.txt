@@ -5,3 +5,4 @@ asyncpg
 pydantic>=2.0
 python-dotenv
 python-multipart
+pytest-asyncio
