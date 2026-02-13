@@ -47,6 +47,29 @@ def upgrade():
     create_enum('would_take_again_enum',
                 ['yes', 'no', 'with_changes'])
 
+    # ── TRADES (TRUE BASELINE CREATE) ────────────────────────
+    op.create_table(
+        'trades',
+        sa.Column('id', sa.Integer(), primary_key=True),
+        sa.Column('ticker', sa.String(), nullable=False),
+        sa.Column('direction',
+                  postgresql.ENUM(name='exec_direction', create_type=False),
+                  nullable=False),
+        sa.Column('quantity', sa.Numeric(18, 8), nullable=False),
+        sa.Column('original_quantity', sa.Numeric(18, 8), nullable=False),
+        sa.Column('entry_price', sa.Numeric(18, 8), nullable=False),
+        sa.Column('exit_price', sa.Numeric(18, 8)),
+        sa.Column('realized_pnl', sa.Numeric(18, 8)),
+        sa.Column('created_at',
+                  sa.DateTime(timezone=True),
+                  server_default=sa.text('now()'),
+                  nullable=False),
+        sa.Column('end_date', sa.DateTime(timezone=True)),
+    )
+
+    op.create_index('ix_trades_id', 'trades', ['id'])
+    op.create_index('ix_trades_ticker', 'trades', ['ticker'])
+
     # ── EXECUTIONS ───────────────────────────────────────────
     op.create_table(
         'executions',
@@ -153,24 +176,6 @@ def upgrade():
     op.create_index('ix_trade_exit_notes_user_id',
                     'trade_exit_notes', ['user_id'])
 
-    # ── TRADES.quantity SAFE ADD ─────────────────────────────
-    op.add_column('trades',
-                  sa.Column('quantity', sa.Numeric(18, 8)))
-
-    op.execute("""
-        UPDATE trades
-        SET quantity = original_quantity
-        WHERE quantity IS NULL
-    """)
-
-    op.alter_column('trades', 'quantity', nullable=False)
-    op.alter_column('trades', 'original_quantity', nullable=False)
-    op.alter_column('trades', 'entry_price', nullable=False)
-    op.alter_column('trades', 'created_at', nullable=False)
-
-    op.create_index('ix_trades_id', 'trades', ['id'])
-    op.create_index('ix_trades_ticker', 'trades', ['ticker'])
-
 
 def downgrade():
     op.drop_table('trade_exit_notes')
@@ -178,4 +183,5 @@ def downgrade():
     op.drop_table('trade_entry_notes')
     op.drop_table('execution_matches')
     op.drop_table('executions')
-    op.drop_column('trades', 'quantity')
+    op.drop_table('trades')
+
