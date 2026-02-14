@@ -17,8 +17,6 @@ router = APIRouter(prefix="/api/journal", tags=["journal"])
 async def journal_rows(db: AsyncSession = Depends(get_db)):
     """
     One row per CLOSED trade (journal-style).
-
-    Filters out CLOSE-only execution rows.
     """
 
     status_expr = case(
@@ -27,7 +25,9 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
         else_="BREAKEVEN",
     )
 
-    lev_pnl_pct_expr = Trade.realized_pnl_pct * func.nullif(Trade.leverage, 0)
+    lev_pnl_pct_expr = (
+        Trade.realized_pnl_pct * func.nullif(Trade.leverage, 0)
+    )
 
     risk_usd_expr = (
         func.abs(Trade.entry_price - Trade.stop_loss)
@@ -41,7 +41,7 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
             Trade.id,
             Trade.ticker,
             Trade.direction,
-            Trade.entry_date,
+            Trade.created_at.label("entry_date"),  # ✅ FIXED
             Trade.end_date,
             status_expr.label("status"),
             Trade.realized_pnl_pct.label("pnl_pct"),
@@ -49,8 +49,8 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
             rr_expr.label("risk_reward"),
         )
         .where(
-            Trade.end_date.isnot(None),
-            Trade.entry_price.isnot(None),   # 🔑 CRITICAL FIX
+            Trade.exit_price.isnot(None),   # ✅ FIXED (closed definition)
+            Trade.entry_price.isnot(None),
         )
         .order_by(Trade.end_date.desc())
     )
@@ -65,8 +65,8 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
             "id": r.id,
             "ticker": r.ticker,
             "direction": r.direction,
-            "entry_date": r.entry_date.isoformat(),
-            "end_date": r.end_date.isoformat(),
+            "entry_date": r.entry_date.isoformat() if r.entry_date else None,
+            "end_date": r.end_date.isoformat() if r.end_date else None,
             "status": r.status,
             "pnl_pct": f(r.pnl_pct),
             "lev_pnl_pct": f(r.lev_pnl_pct),
@@ -119,8 +119,8 @@ async def journal_monthly(db: AsyncSession = Depends(get_db)):
             func.max(rr).label("largest_rr_win"),
         )
         .where(
-            Trade.end_date.isnot(None),
-            Trade.entry_price.isnot(None),   # 🔑 SAME FIX
+            Trade.exit_price.isnot(None),   # ✅ FIXED
+            Trade.entry_price.isnot(None),
         )
         .group_by(month)
         .order_by(month.desc())
@@ -150,3 +150,4 @@ async def journal_monthly(db: AsyncSession = Depends(get_db)):
         }
         for r in rows
     ]
+
