@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -62,6 +64,7 @@ jobs:
           python -m alembic upgrade head
           python -m alembic current
 
-      - name: Run importer integration test
+      - name: Run test suite (import + lifecycle invariants)
         run: |
-          python -m pytest tests/test_import_integration.py -k importer -s -vv
+          python -m pytest -vv
+
