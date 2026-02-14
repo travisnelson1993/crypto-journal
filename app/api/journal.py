@@ -17,8 +17,6 @@ router = APIRouter(prefix="/api/journal", tags=["journal"])
 async def journal_rows(db: AsyncSession = Depends(get_db)):
     """
     One row per CLOSED trade (journal-style).
-
-    Filters out CLOSE-only execution rows.
     """
 
     status_expr = case(
@@ -27,7 +25,9 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
         else_="BREAKEVEN",
     )
 
-    lev_pnl_pct_expr = Trade.realized_pnl_pct * func.nullif(Trade.leverage, 0)
+    lev_pnl_pct_expr = (
+        Trade.realized_pnl_pct * func.nullif(Trade.leverage, 0)
+    )
 
     risk_usd_expr = (
         func.abs(Trade.entry_price - Trade.stop_loss)
@@ -41,7 +41,7 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
             Trade.id,
             Trade.ticker,
             Trade.direction,
-            Trade.entry_date,
+            Trade.created_at.label("entry_date"),  # ✅ FIXED
             Trade.end_date,
             status_expr.label("status"),
             Trade.realized_pnl_pct.label("pnl_pct"),
@@ -49,8 +49,8 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
             rr_expr.label("risk_reward"),
         )
         .where(
-            Trade.end_date.isnot(None),
-            Trade.entry_price.isnot(None),   # 🔑 CRITICAL FIX
+            Trade.exit_price.isnot(None),   # ✅ FIXED (closed definition)
+            Trade.entry_price.isnot(None),
         )
         .order_by(Trade.end_date.desc())
     )
@@ -65,8 +65,8 @@ async def journal_rows(db: AsyncSession = Depends(get_db)):
             "id": r.id,
             "ticker": r.ticker,
             "direction": r.direction,
-            "entry_date": r.entry_date.isoformat(),
-            "end_date": r.end_date.isoformat(),
+            "entry_date": r.entry_date.isoformat() if r.entry_date else None,
+            "end_date": r.end_date.isoformat() if r.end_date else None,
             "status": r.status,
             "pnl_pct": f(r.pnl_pct),
             "lev_pnl_pct": f(r.lev_pnl_pct),
@@ -119,8 +119,8 @@ async def journal_monthly(db: AsyncSession = Depends(get_db)):
             func.max(rr).label("largest_rr_win"),
         )
         .where(
-            Trade.end_date.isnot(None),
-            Trade.entry_price.isnot(None),   # 🔑 SAME FIX
+            Trade.exit_price.isnot(None),   # ✅ FIXED
+            Trade.entry_price.isnot(None),
         )
         .group_by(month)
         .order_by(month.desc())
@@ -150,3 +150,70 @@ async def journal_monthly(db: AsyncSession = Depends(get_db)):
         }
         for r in rows
     ]
+
+
+# =================================================
+# GLOBAL PERFORMANCE SUMMARY (ALL-TIME)
+# =================================================
+@router.get("/summary")
+async def journal_summary(db: AsyncSession = Depends(get_db)):
+    """
+    Global performance summary across all CLOSED trades.
+    """
+
+    wins = func.sum(case((Trade.realized_pnl > 0, 1), else_=0))
+    losses = func.sum(case((Trade.realized_pnl < 0, 1), else_=0))
+    trades = func.count()
+
+    pnl_pct = Trade.realized_pnl_pct
+    lev_pnl_pct = pnl_pct * func.nullif(Trade.leverage, 0)
+
+    risk_usd = (
+        func.abs(Trade.entry_price - Trade.stop_loss)
+        * Trade.original_quantity
+    )
+
+    rr = Trade.realized_pnl / func.nullif(risk_usd, 0)
+
+    stmt = (
+        select(
+            trades.label("trades"),
+            wins.label("wins"),
+            losses.label("losses"),
+            (wins / func.nullif((wins + losses), 0) * 100).label("win_rate_pct"),
+            (func.sum(pnl_pct) * 100).label("gains_pct"),
+            (func.avg(pnl_pct) * 100).label("avg_return_pct"),
+            (func.sum(lev_pnl_pct) * 100).label("lev_gains_pct"),
+            (func.avg(lev_pnl_pct) * 100).label("avg_return_lev_pct"),
+            func.sum(rr).label("total_rr"),
+            func.avg(rr).label("avg_rr"),
+            (func.max(pnl_pct) * 100).label("largest_win_pct"),
+            (func.max(lev_pnl_pct) * 100).label("largest_lev_pct"),
+            func.max(rr).label("largest_rr_win"),
+        )
+        .where(
+            Trade.exit_price.isnot(None),
+            Trade.entry_price.isnot(None),
+        )
+    )
+
+    row = (await db.execute(stmt)).one()
+
+    def f(x):
+        return float(x) if x is not None else None
+
+    return {
+        "trades": int(row.trades or 0),
+        "wins": int(row.wins or 0),
+        "losses": int(row.losses or 0),
+        "win_rate_pct": f(row.win_rate_pct),
+        "gains_pct": f(row.gains_pct),
+        "avg_return_pct": f(row.avg_return_pct),
+        "lev_gains_pct": f(row.lev_gains_pct),
+        "avg_return_lev_pct": f(row.avg_return_lev_pct),
+        "total_rr": f(row.total_rr),
+        "avg_rr": f(row.avg_rr),
+        "largest_win_pct": f(row.largest_win_pct),
+        "largest_lev_pct": f(row.largest_lev_pct),
+        "largest_rr_win": f(row.largest_rr_win),
+    }
