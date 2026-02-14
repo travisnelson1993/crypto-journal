@@ -1,8 +1,10 @@
-from datetime import date
-from typing import List, Dict, Any, Tuple
+# app/services/analytics/discipline/persistence.py
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import date
+from typing import List, Dict, Any
+
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.discipline_snapshot import DisciplineSnapshot
 
@@ -17,30 +19,31 @@ async def persist_discipline_snapshot(
     penalties: List[Dict[str, Any]],
     patterns: List[Dict[str, Any]],
     coaching_flags: List[str],
-) -> Tuple[DisciplineSnapshot, str]:
+) -> DisciplineSnapshot:
     """
-    Persist a daily discipline snapshot.
+    Persist (or update) a daily discipline snapshot.
 
+    Behavior:
     - One snapshot per day (idempotent by snapshot_date)
-    - Advisory only
-    - Overwrites existing snapshot for the same date
-
-    Returns:
-        (snapshot, status)
-        status: "created" | "updated"
+    - Advisory only (no trade blocking)
+    - Overwrites existing snapshot for same date
     """
 
-    # -------------------------------------------------
-    # Check for existing snapshot for the day
-    # -------------------------------------------------
+    # ---------------------------------------------------------
+    # Check for existing snapshot for this date
+    # ---------------------------------------------------------
     result = await db.execute(
         select(DisciplineSnapshot).where(
             DisciplineSnapshot.snapshot_date == snapshot_date
         )
     )
+
     existing = result.scalar_one_or_none()
 
     if existing:
+        # -----------------------------------------------------
+        # Update existing snapshot
+        # -----------------------------------------------------
         existing.discipline_score = discipline_score
         existing.grade = grade
         existing.summary = summary
@@ -51,12 +54,12 @@ async def persist_discipline_snapshot(
         await db.commit()
         await db.refresh(existing)
 
-        return existing, "updated"
+        return existing
 
-    # -------------------------------------------------
+    # ---------------------------------------------------------
     # Create new snapshot
-    # -------------------------------------------------
-    snapshot = DisciplineSnapshot(
+    # ---------------------------------------------------------
+    new_snapshot = DisciplineSnapshot(
         snapshot_date=snapshot_date,
         discipline_score=discipline_score,
         grade=grade,
@@ -66,9 +69,8 @@ async def persist_discipline_snapshot(
         coaching_flags=coaching_flags,
     )
 
-    db.add(snapshot)
+    db.add(new_snapshot)
     await db.commit()
-    await db.refresh(snapshot)
+    await db.refresh(new_snapshot)
 
-    return snapshot, "created"
-
+    return new_snapshot
