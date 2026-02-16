@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional, Any
+from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -16,24 +19,33 @@ from app.schemas.trade_plan import TradePlanUpdate
 
 from app.models.trade_entry_note import TradeEntryNote
 from app.models.trade_exit_note import TradeExitNote
-from app.models.trade_note import TradeNote
 from app.models.trade_mindset_tag import TradeMindsetTag
+
+# TradeNote is defined in app/models/journal.py (table: trade_notes)
+from app.models.journal import TradeNote, TradeNoteType
 
 
 router = APIRouter(prefix="/api/trades", tags=["trades"])
 
 
-# -----------------------------
+# =================================================
 # Helpers
-# -----------------------------
-def fdec(x: Optional[Decimal]) -> Optional[float]:
-    """Safe Decimal -> float (preserves 0)."""
+# =================================================
+def _f(x):
     return float(x) if x is not None else None
 
 
-def enum_to_str(x: Any) -> Any:
-    """Safely convert Enum-like objects to their string value."""
-    return x.value if hasattr(x, "value") else x
+async def _get_trade_or_404(db: AsyncSession, trade_id: int) -> Trade:
+    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    trade = result.scalar_one_or_none()
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    return trade
+
+
+def _is_closed(trade: Trade) -> bool:
+    # Source of truth for CLOSED state
+    return trade.end_date is not None
 
 
 # =================================================
@@ -85,8 +97,9 @@ async def open_trade(
         quantity=payload.quantity,
         original_quantity=payload.quantity,
         leverage=payload.leverage or 1.0,
-        entry_summary=payload.entry_summary,
-        source=payload.source,
+        entry_date=datetime.utcnow(),  # keep if your Trade model has it
+        entry_summary=payload.entry_summary,  # keep if your Trade model has it
+        source=payload.source,  # keep if your Trade model has it
         risk_warnings=risk_warnings,
     )
 
@@ -98,8 +111,8 @@ async def open_trade(
         "id": trade.id,
         "ticker": trade.ticker,
         "direction": trade.direction,
-        "entry_price": fdec(trade.entry_price),
-        "quantity": fdec(trade.quantity),
+        "entry_price": _f(trade.entry_price),
+        "quantity": _f(trade.quantity),
         "leverage": float(trade.leverage),
         "risk_warnings": trade.risk_warnings,
         "note": "Trade opened successfully",
@@ -114,29 +127,31 @@ async def get_trade(
     trade_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Trade).where(Trade.id == trade_id))
-    trade = result.scalar_one_or_none()
-
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
+    trade = await _get_trade_or_404(db, trade_id)
 
     return {
         "id": trade.id,
         "ticker": trade.ticker,
         "direction": trade.direction,
-        "entry_price": fdec(trade.entry_price),
-        "quantity": fdec(trade.quantity),
-        "original_quantity": fdec(trade.original_quantity),
+        "entry_price": _f(trade.entry_price),
+        "exit_price": _f(getattr(trade, "exit_price", None)),
+        "quantity": _f(trade.quantity) if trade.quantity is not None else _f(trade.original_quantity),
+        "original_quantity": _f(trade.original_quantity),
         "leverage": float(trade.leverage),
-        "created_at": trade.created_at.isoformat(),
-        "stop_loss": fdec(trade.stop_loss),
-        "fee": fdec(trade.fee),
-        "realized_pnl": fdec(trade.realized_pnl),
-        "realized_pnl_pct": fdec(trade.realized_pnl_pct),
+        "created_at": trade.created_at.isoformat() if trade.created_at else None,
+        "entry_date": trade.entry_date.isoformat() if getattr(trade, "entry_date", None) else None,
+        "end_date": trade.end_date.isoformat() if trade.end_date else None,
+        "stop_loss": _f(trade.stop_loss),
+        "fee": _f(trade.fee),
+        "realized_pnl": _f(trade.realized_pnl),
+        "realized_pnl_pct": _f(trade.realized_pnl_pct),
         "risk_warnings": trade.risk_warnings,
         "trade_plan": trade.trade_plan,
-        "end_date": trade.end_date.isoformat() if trade.end_date is not None else None,
-        "exit_price": fdec(trade.exit_price),
+        "entry_summary": getattr(trade, "entry_summary", None),
+        "source": getattr(trade, "source", None),
+        "account_equity_at_entry": _f(getattr(trade, "account_equity_at_entry", None)),
+        "risk_usd_at_entry": _f(getattr(trade, "risk_usd_at_entry", None)),
+        "risk_pct_at_entry": _f(getattr(trade, "risk_pct_at_entry", None)),
     }
 
 
@@ -155,13 +170,9 @@ async def close_trade_endpoint(
     payload: CloseTradeRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Trade).where(Trade.id == trade_id))
-    trade = result.scalar_one_or_none()
+    trade = await _get_trade_or_404(db, trade_id)
 
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-
-    if trade.end_date is not None:
+    if _is_closed(trade):
         raise HTTPException(status_code=400, detail="Trade already closed")
 
     close_trade(
@@ -177,10 +188,9 @@ async def close_trade_endpoint(
     return {
         "id": trade.id,
         "ticker": trade.ticker,
-        "end_date": trade.end_date.isoformat() if trade.end_date is not None else None,
-        "exit_price": fdec(trade.exit_price),
-        "realized_pnl": fdec(trade.realized_pnl),
-        "realized_pnl_pct": fdec(trade.realized_pnl_pct),
+        "end_date": trade.end_date.isoformat() if trade.end_date else None,
+        "realized_pnl": _f(trade.realized_pnl),
+        "realized_pnl_pct": _f(trade.realized_pnl_pct),
     }
 
 
@@ -193,17 +203,10 @@ async def update_trade_plan(
     payload: TradePlanUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Trade).where(Trade.id == trade_id))
-    trade = result.scalar_one_or_none()
+    trade = await _get_trade_or_404(db, trade_id)
 
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-
-    if trade.end_date is not None:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot update plan on closed trade",
-        )
+    if _is_closed(trade):
+        raise HTTPException(status_code=400, detail="Cannot update plan on closed trade")
 
     updates = payload.model_dump(exclude_unset=True)
 
@@ -212,21 +215,14 @@ async def update_trade_plan(
         and "planned_stop_price" in updates
         and updates["planned_entry_price"] == updates["planned_stop_price"]
     ):
-        raise HTTPException(
-            status_code=400,
-            detail="planned_entry_price and planned_stop_price cannot be equal",
-        )
+        raise HTTPException(status_code=400, detail="planned_entry_price and planned_stop_price cannot be equal")
 
     trade.trade_plan = {**(trade.trade_plan or {}), **updates}
 
     await db.commit()
     await db.refresh(trade)
 
-    return {
-        "status": "ok",
-        "trade_id": trade.id,
-        "trade_plan": trade.trade_plan,
-    }
+    return {"status": "ok", "trade_id": trade.id, "trade_plan": trade.trade_plan}
 
 
 # =================================================
@@ -243,24 +239,16 @@ async def set_equity_snapshot(
     payload: EquitySnapshotIn,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Trade).where(Trade.id == trade_id))
-    trade = result.scalar_one_or_none()
+    trade = await _get_trade_or_404(db, trade_id)
 
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-
-    if trade.account_equity_at_entry is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="Equity snapshot already set for this trade",
-        )
+    if getattr(trade, "account_equity_at_entry", None) is not None:
+        raise HTTPException(status_code=409, detail="Equity snapshot already set for this trade")
 
     with db.no_autoflush:
         equity = payload.account_equity_at_entry
         trade.account_equity_at_entry = equity
 
         risk_usd = payload.risk_usd_at_entry
-
         if risk_usd is None and trade.stop_loss is not None:
             risk_per_unit = (trade.entry_price - trade.stop_loss).copy_abs()
             risk_usd = risk_per_unit * trade.original_quantity
@@ -279,51 +267,216 @@ async def set_equity_snapshot(
     return {
         "id": trade.id,
         "ticker": trade.ticker,
-        "account_equity_at_entry": fdec(trade.account_equity_at_entry),
-        "risk_usd_at_entry": fdec(trade.risk_usd_at_entry),
-        "risk_pct_at_entry": fdec(trade.risk_pct_at_entry),
+        "account_equity_at_entry": _f(trade.account_equity_at_entry),
+        "risk_usd_at_entry": _f(trade.risk_usd_at_entry),
+        "risk_pct_at_entry": _f(trade.risk_pct_at_entry),
         "risk_warnings": trade.risk_warnings,
         "note": "Equity snapshot stored (immutable)",
     }
 
 
 # =================================================
-# TRADE REFLECTION (Unified Retrieval — READ ONLY)
+# ENTRY NOTE (ONLY BEFORE CLOSE) — Upsert Allowed
+# =================================================
+class EntryNoteRequest(BaseModel):
+    user_id: UUID
+    entry_reasons: Dict[str, Any] = Field(default_factory=dict)
+    strategy: Optional[str] = None
+    planned_risk_pct: Optional[Decimal] = None
+    confidence_at_entry: Optional[int] = Field(default=None, ge=1, le=10)
+    optional_comment: Optional[str] = None
+
+
+@router.post("/{trade_id}/entry-note")
+async def upsert_entry_note(
+    trade_id: int,
+    payload: EntryNoteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    trade = await _get_trade_or_404(db, trade_id)
+
+    if _is_closed(trade):
+        raise HTTPException(status_code=400, detail="Entry note can only be saved before the trade is closed")
+
+    existing = (
+        await db.execute(select(TradeEntryNote).where(TradeEntryNote.trade_id == trade_id))
+    ).scalar_one_or_none()
+
+    if existing:
+        existing.entry_reasons = payload.entry_reasons
+        existing.strategy = payload.strategy
+        existing.planned_risk_pct = payload.planned_risk_pct
+        existing.confidence_at_entry = payload.confidence_at_entry
+        existing.optional_comment = payload.optional_comment
+        await db.commit()
+        await db.refresh(existing)
+        return {"status": "updated", "trade_id": trade_id}
+
+    note = TradeEntryNote(
+        trade_id=trade_id,
+        user_id=payload.user_id,
+        entry_reasons=payload.entry_reasons,
+        strategy=payload.strategy,
+        planned_risk_pct=payload.planned_risk_pct,
+        confidence_at_entry=payload.confidence_at_entry,
+        optional_comment=payload.optional_comment,
+    )
+    db.add(note)
+    await db.commit()
+    return {"status": "created", "trade_id": trade_id}
+
+
+# =================================================
+# EXIT NOTE (ONLY AFTER CLOSE) — Upsert Allowed
+# =================================================
+class ExitNoteRequest(BaseModel):
+    user_id: UUID
+    exit_type: str  # tp | sl | manual | early
+    plan_followed: int = Field(..., ge=0, le=1)
+    violation_reason: Optional[str] = None  # fomo | loss_aversion | doubt | impatience
+    would_take_again: Optional[str] = None  # yes | no | with_changes
+
+
+@router.post("/{trade_id}/exit-note")
+async def upsert_exit_note(
+    trade_id: int,
+    payload: ExitNoteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    trade = await _get_trade_or_404(db, trade_id)
+
+    if not _is_closed(trade):
+        raise HTTPException(status_code=400, detail="Exit note can only be saved after the trade is closed")
+
+    existing = (
+        await db.execute(select(TradeExitNote).where(TradeExitNote.trade_id == trade_id))
+    ).scalar_one_or_none()
+
+    if existing:
+        existing.exit_type = payload.exit_type
+        existing.plan_followed = payload.plan_followed
+        existing.violation_reason = payload.violation_reason
+        existing.would_take_again = payload.would_take_again
+        await db.commit()
+        await db.refresh(existing)
+        return {"status": "updated", "trade_id": trade_id}
+
+    note = TradeExitNote(
+        trade_id=trade_id,
+        user_id=payload.user_id,
+        exit_type=payload.exit_type,
+        plan_followed=payload.plan_followed,
+        violation_reason=payload.violation_reason,
+        would_take_again=payload.would_take_again,
+    )
+    db.add(note)
+    await db.commit()
+    return {"status": "created", "trade_id": trade_id}
+
+
+# =================================================
+# TRADE NOTES (APPEND-ONLY)
+# - mid: anytime
+# - entry: only before close
+# - exit: only after close
+# =================================================
+class TradeNoteRequest(BaseModel):
+    note_type: TradeNoteType
+    content: str = Field(..., min_length=1)
+
+
+@router.post("/{trade_id}/notes")
+async def add_trade_note(
+    trade_id: int,
+    payload: TradeNoteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    trade = await _get_trade_or_404(db, trade_id)
+
+    if payload.note_type == TradeNoteType.entry and _is_closed(trade):
+        raise HTTPException(status_code=400, detail="Entry-type notes require an open trade")
+    if payload.note_type == TradeNoteType.exit and not _is_closed(trade):
+        raise HTTPException(status_code=400, detail="Exit-type notes require a closed trade")
+
+    note = TradeNote(
+        trade_id=trade_id,
+        note_type=payload.note_type,
+        content=payload.content,
+    )
+    db.add(note)
+    await db.commit()
+    await db.refresh(note)
+
+    return {
+        "status": "created",
+        "trade_id": trade_id,
+        "note": {
+            "id": note.id,
+            "note_type": note.note_type,
+            "content": note.content,
+            "created_at": note.created_at.isoformat(),
+        },
+    }
+
+
+# =================================================
+# MINDSET TAG (APPEND-ONLY)
+# =================================================
+class MindsetTagRequest(BaseModel):
+    trade_note_id: int
+    tag: str  # must match TradeMindsetTagType enum values
+
+
+@router.post("/{trade_id}/mindset-tags")
+async def add_mindset_tag(
+    trade_id: int,
+    payload: MindsetTagRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    # Ensure note belongs to this trade (prevents tagging random notes)
+    note = (
+        await db.execute(select(TradeNote).where(TradeNote.id == payload.trade_note_id))
+    ).scalar_one_or_none()
+
+    if not note or note.trade_id != trade_id:
+        raise HTTPException(status_code=404, detail="Trade note not found for this trade")
+
+    tag_row = TradeMindsetTag(
+        trade_note_id=payload.trade_note_id,
+        tag=payload.tag,
+    )
+    db.add(tag_row)
+    await db.commit()
+    await db.refresh(tag_row)
+
+    return {
+        "status": "created",
+        "trade_id": trade_id,
+        "tag": tag_row.tag,
+        "trade_note_id": tag_row.trade_note_id,
+    }
+
+
+# =================================================
+# TRADE REFLECTION (READ ONLY)
 # =================================================
 @router.get("/{trade_id}/reflection")
 async def get_trade_reflection(
     trade_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Returns complete reflection package for a trade:
-    - Entry intent
-    - Exit evaluation
-    - Notes (entry/mid/exit)
-    - Mindset tags
-    """
-
-    result = await db.execute(select(Trade).where(Trade.id == trade_id))
-    trade = result.scalar_one_or_none()
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
+    trade = await _get_trade_or_404(db, trade_id)
 
     entry_note = (
-        await db.execute(
-            select(TradeEntryNote).where(TradeEntryNote.trade_id == trade_id)
-        )
+        await db.execute(select(TradeEntryNote).where(TradeEntryNote.trade_id == trade_id))
     ).scalar_one_or_none()
 
     exit_note = (
-        await db.execute(
-            select(TradeExitNote).where(TradeExitNote.trade_id == trade_id)
-        )
+        await db.execute(select(TradeExitNote).where(TradeExitNote.trade_id == trade_id))
     ).scalar_one_or_none()
 
     trade_notes = (
-        await db.execute(
-            select(TradeNote).where(TradeNote.trade_id == trade_id)
-        )
+        await db.execute(select(TradeNote).where(TradeNote.trade_id == trade_id).order_by(TradeNote.created_at.asc()))
     ).scalars().all()
 
     mindset_tags = (
@@ -336,29 +489,41 @@ async def get_trade_reflection(
 
     return {
         "trade_id": trade_id,
-        "entry_note": {
-            "strategy": entry_note.strategy,
-            "planned_risk_pct": fdec(entry_note.planned_risk_pct),
-            "confidence_at_entry": entry_note.confidence_at_entry,
-            "entry_reasons": entry_note.entry_reasons,
-            "optional_comment": entry_note.optional_comment,
-            "created_at": entry_note.created_at.isoformat(),
-        } if entry_note else None,
-        "exit_note": {
-            "exit_type": enum_to_str(exit_note.exit_type) if exit_note else None,
-            "plan_followed": exit_note.plan_followed if exit_note else None,
-            "violation_reason": enum_to_str(exit_note.violation_reason) if exit_note else None,
-            "would_take_again": enum_to_str(exit_note.would_take_again) if exit_note else None,
-            "created_at": exit_note.created_at.isoformat() if exit_note and exit_note.created_at else None,
-        } if exit_note else None,
+        "closed": _is_closed(trade),
+        "entry_note": (
+            {
+                "strategy": entry_note.strategy,
+                "planned_risk_pct": _f(entry_note.planned_risk_pct) if entry_note.planned_risk_pct is not None else None,
+                "confidence_at_entry": entry_note.confidence_at_entry,
+                "entry_reasons": entry_note.entry_reasons,
+                "optional_comment": entry_note.optional_comment,
+                "created_at": entry_note.created_at.isoformat(),
+            }
+            if entry_note
+            else None
+        ),
+        "exit_note": (
+            {
+                "exit_type": exit_note.exit_type,
+                "plan_followed": exit_note.plan_followed,
+                "violation_reason": exit_note.violation_reason,
+                "would_take_again": exit_note.would_take_again,
+                "created_at": exit_note.created_at.isoformat(),
+            }
+            if exit_note
+            else None
+        ),
         "notes": [
             {
                 "id": n.id,
-                "note_type": enum_to_str(n.note_type),
+                "note_type": n.note_type,
                 "content": n.content,
                 "created_at": n.created_at.isoformat(),
             }
             for n in trade_notes
         ],
-        "mindset_tags": [enum_to_str(tag.tag) for tag in mindset_tags],
+        "mindset_tags": [
+            {"trade_note_id": t.trade_note_id, "tag": t.tag, "created_at": t.created_at.isoformat()}
+            for t in mindset_tags
+        ],
     }
